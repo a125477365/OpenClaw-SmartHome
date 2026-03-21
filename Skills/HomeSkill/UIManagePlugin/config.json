@@ -1,4 +1,9 @@
 {
+  "httpsPort": 8083,
   "httpPort": 8082,
-  "webRoot": "./web"
+  "webRoot": "./web",
+  "ssl": {
+    "key": "./ssl/key.pem",
+    "cert": "./ssl/cert.pem"
+  }
 }
