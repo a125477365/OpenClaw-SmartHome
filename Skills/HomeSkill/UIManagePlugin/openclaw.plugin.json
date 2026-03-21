@@ -1,0 +1,16 @@
+{
+  "id": "ui-manage",
+  "name": "智能家居管理界面插件",
+  "version": "1.0.0",
+  "entry": "index.js",
+  "description": "提供网页版设备管理界面，支持查看、编辑、授权设备",
+  "type": "web",
+  "services": [
+    "http-server"
+  ],
+  "dependencies": {
+    "skills": [
+      "home-smart-skill"
+    ]
+  }
+}

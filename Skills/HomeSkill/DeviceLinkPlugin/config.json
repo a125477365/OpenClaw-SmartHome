@@ -1,0 +1,9 @@
+{
+  "devicePort": 8080,
+  "httpPort": 8081,
+  "encryption": {
+    "algorithm": "aes-256-cbc",
+    "keyLength": 32,
+    "ivLength": 16
+  }
+}

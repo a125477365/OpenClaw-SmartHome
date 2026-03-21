@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>智能家居管理</title>
+    <meta charset="utf-8">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .device { border: 1px solid #ccc; padding: 20px; margin: 20px 0; border-radius: 5px; }
+        .device h2 { margin-top: 0; }
+        .status { font-weight: bold; }
+        .status.online { color: green; }
+        .status.offline { color: red; }
+        .status.unauthorized { color: orange; }
+        button { padding: 10px 15px; margin: 5px; cursor: pointer; }
+        button.auth { background-color: #4CAF50; color: white; border: none; }
+        button.unauth { background-color: #f44336; color: white; border: none; }
+        button.control { background-color: #2196F3; color: white; border: none; }
+        .form-group { margin: 15px 0; }
+        label { display: block; margin-bottom: 5px; }
+        input { padding: 8px; width: 250px; }
+        .add-device { border: 1px dashed #ccc; padding: 20px; margin: 20px 0; }
+    </style>
+</head>
+<body>
+    <h1>智能家居设备管理</h1>
+    <div class="add-device">
+        <h2>添加新设备</h2>
+        <div class="form-group">
+            <label for="deviceName">设备名称:</label>
+            <input type="text" id="deviceName" placeholder="例如：客厅灯">
+        </div>
+        <div class="form-group">
+            <label for="deviceIp">设备IP:</label>
+            <input type="text" id="deviceIp" placeholder="例如：192.168.1.100">
+        </div>
+        <div class="form-group">
+            <label for="deviceMac">设备MAC (deviceId):</label>
+            <input type="text" id="deviceMac" placeholder="例如：AA:BB:CC:DD:EE:FF">
+        </div>
+        <button onclick="addDevice()">添加设备</button>
+    </div>
+    <div id="devicesList">
+        <h2>设备列表</h2>
+        <p>正在加载设备列表...</p>
+    </div>
+
+    <script>
+        // 加载设备列表
+        function loadDevices() {
+            fetch('/api/devices')
+                .then(response => response.json())
+                .then(data => {
+                    const devicesList = document.getElementById('devicesList');
+                    if (data.devices && data.devices.length > 0) {
+                        devicesList.innerHTML = `
+                            <h2>设备列表</h2>
+                            ${data.devices.map(device => `
+                                <div class="device">
+                                    <h2>${device.name || '未命名设备'} (${device.deviceId})</h2>
+                                    <p>IP: ${device.ip || '未知'}</p>
+                                    <p>状态: 
+                                        <span class="status ${device.online ? 'online' : device.authorized ? 'unauthorized' : 'offline'}">
+                                            ${device.online ? '在线' : device.authorized ? '未授权' : '离线'}
+                                        </span>
+                                    </p>
+                                    <p>授权状态: ${device.authorized ? '已授权' : '未授权'}</p>
+                                    ${device.state ? `<p>当前状态: ${JSON.stringify(device.state)}</p>` : ''}
+                                    <div>
+                                        ${!device.authorized ? `
+                                            <button class="auth" onclick="authorizeDevice('${device.deviceId}')">授权</button>
+                                        ` : `
+                                            <button class="unauth" onclick="unauthorizeDevice('${device.deviceId}')">取消授权</button>
+                                        `}
+                                        ${device.authorized && device.online ? `
+                                            <button class="control" onclick="controlDevice('${device.deviceId}', 'on')">开灯</button>
+                                            <button class="control" onclick="controlDevice('${device.deviceId}', 'off')">关灯</button>
+                                            <button class="control" onclick="controlDevice('${device.deviceId}', 'query')">查询状态</button>
+                                        ` : ''}
+                                    </div>
+                                </div>
+                            `).join('')}
+                        `;
+                    } else {
+                        devicesList.innerHTML = '<h2>设备列表</h2><p>暂无设备</p>';
+                    }
+                })
+                .catch(err => {
+                    document.getElementById('devicesList').innerHTML = '<h2>设备列表</h2><p>加载失败: ' + err + '</p>';
+                });
+        }
+
+        function addDevice() {
+            const name = document.getElementById('deviceName').value.trim();
+            const ip = document.getElementById('deviceIp').value.trim();
+            const mac = document.getElementById('deviceMac').value.trim();
+            if (!name || !ip || !mac) {
+                alert('请填写所有字段');
+                return;
+            }
+            fetch('/api/devices', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, ip, deviceId: mac })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    alert('设备添加成功，请授权后使用');
+                    loadDevices();
+                    // 清空输入框
+                    document.getElementById('deviceName').value = '';
+                    document.getElementById('deviceIp').value = '';
+                    document.getElementById('deviceMac').value = '';
+                } else {
+                    alert('添加失败: ' + result.error);
+                }
+            })
+            .catch(err => {
+                alert('网络错误: ' + err);
+            });
+        }
+
+        function authorizeDevice(deviceId) {
+            // 生成随机密钥（在实际系统中，应由设备和服务器协商生成）
+            const sessionKey = Math.random().toString(36).substring(2, 18) + Math.random().toString(36).substring(2, 18);
+            const signKey = Math.random().toString(36).substring(2, 18) + Math.random().toString(36).substring(2, 18);
+            fetch('/api/device/authorize', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ deviceId, authorized: true, sessionKey, signKey })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    alert('设备授权成功');
+                    loadDevices();
+                } else {
+                    alert('授权失败: ' + result.error);
+                }
+            })
+            .catch(err => {
+                alert('网络错误: ' + err);
+            });
+        }
+
+        function unauthorizeDevice(deviceId) {
+            fetch('/api/device/unauthorize', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ deviceId })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    alert('设备已取消授权');
+                    loadDevices();
+                } else {
+                    alert('取消授权失败: ' + result.error);
+                }
+            })
+            .catch(err => {
+                alert('网络错误: ' + err);
+            });
+        }
+
+        function controlDevice(deviceId, action) {
+            let params = {};
+            if (action === 'on' || action === 'off') {
+                // 可以添加参数，如延时等
+            }
+            fetch(`/api/device/control`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ deviceId, action, params })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    alert('指令发送成功');
+                    // 如果是查询，可以显示结果
+                    if (action === 'query') {
+                        alert('设备状态: ' + JSON.stringify(result.result));
+                    }
+                    loadDevices();
+                } else {
+                    alert('指令发送失败: ' + result.error);
+                }
+            })
+            .catch(err => {
+                alert('网络错误: ' + err);
+            });
+        }
+
+        // 页面加载时获取设备列表
+        document.addEventListener('DOMContentLoaded', loadDevices);
+    </script>
+</body>
+</html>

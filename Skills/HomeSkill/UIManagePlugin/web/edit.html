@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>编辑设备 - 智能家居管理</title>
+    <meta charset="utf-8">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .form-group { margin: 20px 0; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input { padding: 10px; width: 300px; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 12px 20px; background-color: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #1976D2; }
+        .back { background-color: #9E9E9E; margin-right: 10px; }
+        .back:hover { background-color: #757575; }
+        .save { background-color: #4CAF50; }
+        .save:hover { background-color: #43A047; }
+        .delete { background-color: #f44336; margin-left: 10px; }
+        .delete:hover { background-color: #d32f2f; }
+    </style>
+</head>
+<body>
+    <h1>编辑设备</h1>
+    <a href="index.html" class="back">← 返回设备列表</a>
+    
+    <div id="deviceForm">
+        <h2>设备信息</h2>
+        <div class="form-group">
+            <label for="deviceName">设备名称:</label>
+            <input type="text" id="deviceName" placeholder="例如：客厅灯">
+        </div>
+        <div class="form-group">
+            <label for="deviceIp">设备IP:</label>
+            <input type="text" id="deviceIp" placeholder="例如：192.168.1.100">
+        </div>
+        <div class="form-group">
+            <label for="deviceMac">设备MAC (deviceId):</label>
+            <input type="text" id="deviceMac" placeholder="例如：AA:BB:CC:DD:EE:FF" readonly>
+        </div>
+        <div class="form-group">
+            <label for="authStatus">授权状态:</label>
+            <select id="authStatus">
+                <option value="false">未授权</option>
+                <option value="true">已授权</option>
+            </select>
+        </div>
+        <div id="keyFields" style="display: none; margin-top: 20px;">
+            <h3>加密密钥（仅在授权时填写）</h3>
+            <div class="form-group">
+                <label for="sessionKey">会话密钥:</label>
+                <input type="text" id="sessionKey" placeholder="随机生成的密钥">
+            </div>
+            <div class="form-group">
+                <label for="signKey">签名密钥:</label>
+                <input type="text" id="signKey" placeholder="随机生成的密钥">
+            </div>
+        </div>
+        <div>
+            <button class="back" type="button" onclick="window.history.back()">取消</button>
+            <button class="save" type="button" onclick="saveDevice()">保存更改</button>
+            <button class="delete" type="button" onclick="deleteDevice()">删除设备</button>
+        </div>
+    </div>
+
+    <script>
+        // 从URL参数获取deviceId
+        const urlParams = new URLSearchParams(window.location.search);
+        const deviceId = urlParams.get('id');
+        
+        if (!deviceId) {
+            document.body.innerHTML = '<h1>错误</h1><p>未指定设备ID</p><a href="index.html">返回设备列表</a>';
+        }
+
+        // 加载设备详情
+        function loadDevice() {
+            fetch(`/api/devices`)
+                .then(response => response.json())
+                .then(data => {
+                    const device = data.devices.find(d => d.deviceId === deviceId);
+                    if (!device) {
+                        document.getElementById('deviceForm').innerHTML = '<p>设备不存在</p><a href="index.html">返回设备列表</a>';
+                        return;
+                    }
+                    
+                    document.getElementById('deviceName').value = device.name || '';
+                    document.getElementById('deviceIp').value = device.ip || '';
+                    document.getElementById('deviceMac').value = device.deviceId;
+                    document.getElementById('authStatus').value = device.authorized;
+                    
+                    // 如果已授权，显示密钥字段
+                    if (device.authorized) {
+                        document.getElementById('keyFields').style.display = 'block';
+                        document.getElementById('sessionKey').value = device.sessionKey || '';
+                        document.getElementById('signKey').value = device.signKey || '';
+                    }
+                    
+                    // 授权状态变化时显示/隐藏密钥字段
+                    document.getElementById('authStatus').addEventListener('change', function() {
+                        if (this.value === 'true') {
+                            document.getElementById('keyFields').style.display = 'block';
+                        } else {
+                            document.getElementById('keyFields').style.display = 'none';
+                        }
+                    });
+                })
+                .catch(err => {
+                    document.getElementById('deviceForm').innerHTML = `<p>加载设备失败: ${err}</p><a href="index.html">返回设备列表</a>`;
+                });
+        }
+
+        function saveDevice() {
+            const name = document.getElementById('deviceName').value.trim();
+            const ip = document.getElementById('deviceIp').value.trim();
+            const authorized = document.getElementById('authStatus').value === 'true';
+            const sessionKey = document.getElementById('sessionKey').value.trim();
+            const signKey = document.getElementById('signKey').value.trim();
+            
+            if (!name || !ip) {
+                alert('请填写设备名称和IP');
+                return;
+            }
+            
+            const updateData = {
+                name,
+                ip,
+                authorized
+            };
+            
+            if (authorized) {
+                if (!sessionKey || !signKey) {
+                    alert('授权状态下必须提供会话密钥和签名密钥');
+                    return;
+                }
+                updateData.sessionKey = sessionKey;
+                updateData.signKey = signKey;
+            }
+            
+            fetch(`/api/devices/${deviceId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(updateData)
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    alert('设备更新成功');
+                    window.location.href = 'index.html';
+                } else {
+                    alert('更新失败: ' + result.error);
+                }
+            })
+            .catch(err => {
+                alert('网络错误: ' + err);
+            });
+        }
+
+        function deleteDevice() {
+            if (!confirm('确定要删除此设备吗？此操作不可撤销。')) {
+                return;
+            }
+            
+            fetch(`/api/devices/${deviceId}`, {
+                method: 'DELETE'
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    alert('设备删除成功');
+                    window.location.href = 'index.html';
+                } else {
+                    alert('删除失败: ' + result.error);
+                }
+            })
+            .catch(err => {
+                alert('网络错误: ' + err);
+            });
+        }
+
+        // 页面加载时获取设备详情
+        document.addEventListener('DOMContentLoaded', loadDevice);
+    </script>
+</body>
+</html>

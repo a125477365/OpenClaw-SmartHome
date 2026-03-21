@@ -1,0 +1,14 @@
+{
+  "id": "home-smart-skill",
+  "name": "智能家居技能",
+  "version": "1.0.0",
+  "description": "集成设备连接、管理、控制的智能家居核心技能",
+  "author": "Your Name",
+  "plugins": [
+    "DeviceLinkPlugin",
+    "UIManagePlugin"
+  ],
+  "dependencies": {
+    "openclaw-version": ">=2.0.0"
+  }
+}

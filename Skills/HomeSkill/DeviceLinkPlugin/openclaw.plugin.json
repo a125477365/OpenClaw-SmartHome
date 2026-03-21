@@ -1,0 +1,23 @@
+{
+  "id": "device-link",
+  "name": "设备连接与控制插件",
+  "version": "1.0.0",
+  "entry": "index.js",
+  "description": "负责设备接入、加密通信、文件监听、指令下发与状态上报",
+  "type": "service",
+  "tools": [
+    "device.control",
+    "device.authorize",
+    "device.unauthorize",
+    "device.sync"
+  ],
+  "services": [
+    "device-listener",
+    "file-watcher"
+  ],
+  "dependencies": {
+    "skills": [
+      "home-smart-skill"
+    ]
+  }
+}
