@@ -106,7 +106,7 @@ Both plugins support automatic port selection:
   "pairingTimeout": 60000,
   "portRangeMin": 8080,
   "portRangeMax": 8100,
-  "enableMdnsDiscovery": true,
+  "enableMdnsDiscovery": false,
   "encryption": {
     "algorithm": "aes-256-gcm",
     "keyLength": 32,

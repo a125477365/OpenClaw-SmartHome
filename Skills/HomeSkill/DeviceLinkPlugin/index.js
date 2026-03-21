@@ -50,7 +50,7 @@ module.exports.register = async (api) => {
     pairingTimeout: 60000,
     portRangeMin: 8080,
     portRangeMax: 8100,
-    enableMdnsDiscovery: true, // Can be disabled for public cloud deployment
+    enableMdnsDiscovery: false, // Disabled by default, enable for local network discovery
     encryption: {
       algorithm: 'aes-256-gcm',
       keyLength: 32,
