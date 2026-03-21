@@ -2,79 +2,73 @@
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
-const https = require('https');
-const http = require('http');
-const { generateKeyPairSync, constants } = require('crypto');
 
 module.exports.register = async (api) => {
   const pluginConfig = require('./config.json');
   const webRoot = path.join(__dirname, pluginConfig.webRoot);
   const devicesPath = path.join(__dirname, '../../devices.json');
 
-  // Function to get or generate SSL credentials
-  function getSSLOptions() {
-    const { key, cert } = pluginConfig.ssl || {};
-    if (!key || !cert) {
-      return null;
-    }
-    const keyPath = path.join(__dirname, key);
-    const certPath = path.join(__dirname, cert);
-    // Check if files exist
-    if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
-      try {
-        return {
-          key: fs.readFileSync(keyPath),
-          cert: fs.readFileSync(certPath)
-        };
-      } catch (e) {
-        api.logger.error(`Failed to read SSL files: ${e.message}`);
-        return null;
+  // Ensure SSL certificates exist; generate self-signed if not
+  const ensureSSLCerts = () => {
+    const sslDir = path.join(__dirname, 'ssl');
+    const keyPath = path.join(sslDir, 'key.pem');
+    const certPath = path.join(sslDir, 'cert.pem');
+    if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
+      if (!fs.existsSync(sslDir)) {
+        fs.mkdirSync(sslDir);
       }
-    } else {
-      // Files don't exist, generate a self-signed certificate for development
-      api.logger.info('SSL files not found, generating self-signed certificate for development...');
-      const { publicKey, privateKey } = generateKeyPairSync('rsa', {
-        modulusLength: 2048,
-        publicKeyEncoding: { type: 'spki', format: 'pem' },
-        privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
-      });
-      // In a real implementation, we would create a certificate, but for simplicity we'll just use the key pair.
-      // However, https.createServer expects a certificate, not just a public key.
-      // We'll create a simple self-signed certificate using the generated key pair.
-      // For brevity, we'll use a minimal certificate generation (not production ready).
-      // Since generating a proper certificate is complex, we'll fallback to HTTP if we cannot generate a cert.
-      // In a real setup, the user should provide proper certs.
-      api.logger.warn('Self-signed certificate generation not fully implemented; falling back to HTTP.');
+      // Use OpenSSL to generate self-signed certificate
+      const cmd = `openssl req -x509 -newkey rsa:2048 -keyout ${keyPath} -out ${certPath} -days 365 -nodes -subj "/C=CN/ST=GD/L=SZ/O=OpenClaw/OU=SmartHome/CN=localhost"`;
+      try {
+        execSync(cmd, { stdio: 'ignore' });
+        api.logger.info('Generated self-signed SSL certificates');
+      } catch (e) {
+        api.logger.error('Failed to generate SSL certificates: ' + e.message);
+      }
+    }
+  };
+
+  // Helper to read file
+  const readFileSync = (filepath) => {
+    try {
+      return fs.readFileSync(filepath, 'utf8');
+    } catch (e) {
       return null;
     }
-  }
+  };
 
-  // 启动Web服务 (HTTP or HTTPS based on SSL config)
-  api.startService('web-server', async () => {
-    const sslOptions = getSSLOptions();
-    let server;
+  // 启动HTTP和HTTPS服务
+  api.startService('http-server', async () => {
+    const http = require('http');
+    const https = require('https');
+    const url = require('url');
+    const querystring = require('querystring');
 
-    if (sslOptions) {
-      server = https.createServer(sslOptions, (req, res) => {
-        handleRequest(req, res);
-      });
-      server.listen(pluginConfig.httpsPort, () => {
-        api.logger.info(`UI管理HTTPS服务已启动，监听端口：${pluginConfig.httpsPort}`);
-      });
-    } else {
-      server = http.createServer((req, res) => {
-        handleRequest(req, res);
-      });
-      server.listen(pluginConfig.httpPort, () => {
-        api.logger.info(`UI管理HTTP服务已启动，监听端口：${pluginConfig.httpPort}`);
-      });
+    // HTTP server (redirect to HTTPS)
+    const httpServer = http.createServer((req, res) => {
+      res.writeHead(301, { "Location": `https://${req.headers.host.split(':')[0]}:${pluginConfig.httpsPort}${req.url}` });
+      res.end();
+    });
+
+    httpServer.listen(pluginConfig.httpPort, () => {
+      api.logger.info(`UI管理HTTP重定向服务已启动，监听端口：${pluginConfig.httpPort} -> HTTPS ${pluginConfig.httpsPort}`);
+    });
+
+    // HTTPS server
+    const sslOptions = {
+      key: readFileSync(path.join(__dirname, pluginConfig.ssl.key)),
+      cert: readFileSync(path.join(__dirname, pluginConfig.ssl.cert))
+    };
+
+    // If certs not found, generate them
+    if (!sslOptions.key || !sslOptions.cert) {
+      ensureSSLCerts();
+      // reload
+      sslOptions.key = readFileSync(path.join(__dirname, pluginConfig.ssl.key));
+      sslOptions.cert = readFileSync(path.join(__dirname, pluginConfig.ssl.cert));
     }
 
-    // Request handler function
-    function handleRequest(req, res) {
-      const url = require('url');
-      const querystring = require('querystring');
-
+    const httpsServer = https.createServer(sslOptions, async (req, res) => {
       const parsedUrl = url.parse(req.url, true);
       const pathname = parsedUrl.pathname;
 
@@ -198,10 +192,6 @@ module.exports.register = async (api) => {
                   if (result.success) {
                     alert('设备添加成功，请授权后使用');
                     location.reload();
-                    // 清空输入框
-                    document.getElementById('deviceName').value = '';
-                    document.getElementById('deviceIp').value = '';
-                    document.getElementById('deviceMac').value = '';
                   } else {
                     alert('添加失败: ' + result.error);
                   }
@@ -476,6 +466,10 @@ module.exports.register = async (api) => {
         const readStream = fs.createReadStream(filePath);
         readStream.pipe(res);
       });
-    }
+    });
+
+    httpsServer.listen(pluginConfig.httpsPort, () => {
+      api.logger.info(`UI管理HTTPS服务已启动，监听端口：${pluginConfig.httpsPort}`);
+    });
   });
 };
