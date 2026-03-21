@@ -1,0 +1,19 @@
+{
+  "name": "homesskill",
+  "version": "1.0.0",
+  "description": "OpenClaw Smart Home Skill - Device management and control",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"No tests yet\" && exit 0"
+  },
+  "dependencies": {
+    "chokidar": "^3.5.3"
+  },
+  "keywords": [
+    "openclaw",
+    "smart-home",
+    "iot",
+    "device-control"
+  ],
+  "license": "MIT"
+}

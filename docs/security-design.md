@@ -1,7 +1,7 @@
 # Security Design for OpenClaw Smart Home System
 
 ## Overview
-This document details the security measures implemented in the OpenClaw Smart Home system to prevent counterfeiting, impersonation, and hijacking attacks.
+This document details the security measures implemented in the OpenClaw Smart Home system to prevent counterfeiting, impersonation, and hijacking attacks. The design follows the standard Bluetooth pairing model (cross-brand, no pre-shared secrets) using ECDH key exchange.
 
 ## Threat Model
 1. **Device Cloning**: Attacker creates a fake device with copied MAC address
@@ -13,92 +13,145 @@ This document details the security measures implemented in the OpenClaw Smart Ho
 
 ## Security Measures
 
-### 1. Device Authentication & Anti-Counterfeiting
-- **MAC Address as Device ID**: Each ESP32 has a globally unique MAC address burned in during manufacturing, used as the immutable deviceId
-- **Factory Secret Key**: A 128-bit secret key is burned into each device during manufacturing (stored in secure flash or efuse)
-- **Key Derivation**: Session-specific encryption and signing keys are derived from:
-  - Factory secret (unique per device)
-  - Pairing nonce (random challenge from OpenClaw)
-  - Purpose labels ("session" for encryption key, "sign" for signing key)
-- **Pairing Process**: 
-  1. Device connects to WiFi (via provisioning)
-  2. Device listens for TCP connections on port 8080
-  3. OpenClaw initiates TCP connection and sends pairing request with deviceId and random nonce
-  4. Device verifies deviceId matches its MAC address
-  5. Device derives session keys using factory secret and nonce
-  6. Device responds with pairing success (no keys transmitted - OpenClaw can derive same keys)
-  7. After successful pairing, both parties share the same session keys
+### 1. Device Authentication & Anti-Counterfeiting (Bluetooth-Style Pairing)
 
-### 2. Message Confidentiality
-- **Encryption Algorithm**: AES-256-CBC
-- **Key Length**: 256-bit session key derived during pairing
-- **Initialization Vector (IV)**: Random 16-byte IV generated for each message
-- **Implementation**: Each message includes a unique IV, preventing pattern recognition
+**Key Principle**: NO pre-shared factory secrets. All keys are derived dynamically during pairing using ECDH, following standard Bluetooth cross-brand pairing model.
 
-### 3. Message Integrity & Authenticity
-- **Authentication Algorithm**: HMAC-SHA256
-- **Key Length**: 256-bit signing key derived during pairing (different from encryption key)
-- **HMAC Input**: Concatenation of (plaintext JSON + encrypted ciphertext)
-- **Verification**: Receiver computes HMAC using shared signing key and compares with transmitted value
+- **MAC Address as Device ID**: Each ESP32 has a globally unique MAC address burned in during manufacturing, used as the immutable deviceId (like Bluetooth BD_ADDR)
 
-### 4. Replay Attack Protection
+- **Per-Device EC Key Pair**: Each device generates its own EC key pair (Curve25519 or secp256r1) during first boot. The private key never leaves the device; the public key is shared during pairing.
+
+- **ECDH Key Exchange**: Session keys are derived through Elliptic Curve Diffie-Hellman key exchange:
+  - Both parties exchange public keys
+  - Each computes shared secret: `sharedSecret = ECDH(myPrivateKey, theirPublicKey)`
+  - Session keys are derived from this shared secret
+
+- **No Pre-Shared Secrets**: Different manufacturers' devices can pair without any prior arrangement. Each pairing is independent.
+
+- **Anti-Cloning**: Even if MAC address is copied, the attacker cannot compute the correct session keys without the device's private EC key.
+
+### 2. Pairing Process (Bluetooth SSP Equivalent)
+
+The pairing process mimics Bluetooth Secure Simple Pairing (SSP) with "Just Works" model (no display on the device):
+
+#### Step 1: Device Discovery
+- Device connects to WiFi (via provisioning)
+- Device announces itself via mDNS or TCP listen on port 8080
+- OpenClaw discovers device via network scan or user-provided IP
+
+#### Step 2: Public Key Exchange
+- OpenClaw sends: `{ type: "pairing_start", deviceId: "MAC", ephemeralPublicKey: "..." }`
+- Device verifies deviceId matches its MAC
+- Device responds: `{ type: "pairing_response", staticPublicKey: "...", signature: "..." }`
+- The signature proves ownership of the static private key
+
+#### Step 3: ECDH Key Derivation
+- Both parties compute shared secret:
+  - OpenClaw: `sharedSecret = ECDH(ephemeralPrivateKey, deviceStaticPublicKey)`
+  - Device: `sharedSecret = ECDH(staticPrivateKey, openclawEphemeralPublicKey)`
+- Derive session keys using HKDF:
+  - `sessionKey = HKDF(sharedSecret, "encryption", salt)`
+  - `signKey = HKDF(sharedSecret, "signing", salt)`
+
+#### Step 4: User Confirmation (Numeric Comparison)
+- Both sides compute a confirmation value: `confirmHash = SHA256(sharedSecret || nonce)`
+- Display 6-digit numeric code derived from confirmation hash:
+  - On OpenClaw UI: show the code
+  - On device: if has display, show same code; otherwise, user confirms by physical presence (button press)
+- User must confirm both codes match (prevents MITM)
+
+#### Step 5: Finalize Pairing
+- After user confirmation, both parties mark the pairing as complete
+- OpenClaw stores the device's static public key (for future reconnection)
+- Session keys are now established for encrypted communication
+
+### 3. Reconnection Flow
+
+For subsequent connections after initial pairing:
+
+1. Device sends its static public key
+2. OpenClaw verifies it matches stored public key for that deviceId
+3. OpenClaw generates new ephemeral key pair
+4. Both perform ECDH to derive new session keys
+5. No user confirmation needed (keys already trusted)
+
+### 4. Message Confidentiality
+
+- **Encryption Algorithm**: AES-256-GCM (provides both encryption and authentication)
+- **Key Length**: 256-bit session key derived from ECDH shared secret
+- **Nonce/IV**: Random 12-byte nonce per message (AES-GCM standard)
+- **Implementation**: Each message includes unique nonce, preventing pattern recognition
+
+### 5. Message Integrity & Authenticity
+
+- **Algorithm**: AES-256-GCM provides built-in authentication tag
+- **Additional Data**: Message metadata (timestamp, nonce) included as AAD
+- **Tag Verification**: Receiver verifies authentication tag before decryption
+
+### 6. Replay Attack Protection
+
 - **Timestamp Field**: Each message includes a Unix timestamp (milliseconds)
 - **Freshness Window**: Receiver only accepts messages within ±5 seconds of current time
-- **Nonce Field**: Each message includes a random 32-bit nonce to prevent exact replay within the time window
+- **Nonce Field**: Each message includes a random 64-bit nonce to prevent exact replay
+- **Nonce Tracking**: Keep track of used nonces within the time window
 
-### 5. Secure Communication Flow
-1. **Device Provisioning**: 
+### 7. Secure Communication Flow
+
+1. **Device Provisioning**:
    - User provisions WiFi credentials via SmartConfig or web portal
    - Device connects to OpenClaw's local network
-   
-2. **Pairing & Authorization**:
-   - OpenClaw discovers device via network scan or user-provided IP
-   - OpenClaw sends pairing request with deviceId (from scan/user) and random nonce
-   - Device verifies deviceId matches its MAC address
-   - Device derives session keys and responds with pairing success
-   - User explicitly authorizes device via UI (device.authorize tool)
-   - Upon authorization, OpenClaw stores derived session keys in devices.json
-   - Device marks itself as authorized and online
 
-3. **Encrypted Command & Control**:
+2. **Initial Pairing** (first time):
+   - Follow Steps 1-5 above (full ECDH exchange with user confirmation)
+   - Device's static public key is stored in devices.json
+   - User explicitly authorizes device via UI
+
+3. **Reconnection** (subsequent):
+   - Simplified ECDH using stored public key
+   - New session keys derived each time
+
+4. **Encrypted Command & Control**:
    - OpenClaw constructs command JSON (deviceId, action, params, timestamp, nonce)
-   - Encrypts JSON using AES-256-CBC with sessionKey and random IV
-   - Computes HMAC-SHA256 of (JSON + encrypted data) using signKey
-   - Sends packet: {type: "encrypted", data: "<base64IV>:<base64Cipher>", sign: "<hexHmac>"}
-   - Device verifies HMAC, decrypts message, checks timestamp/nonce freshness
-   - Device executes command (relay on/off/query)
-   - Device sends encrypted response with new timestamp/nonce
-   - OpenClaw verifies and processes response
+   - Encrypts using AES-256-GCM with sessionKey and random nonce
+   - Device verifies tag, decrypts, executes command
+   - Device sends encrypted response with new nonce
 
-### 6. Production Security Enhancements
-For production deployment, consider:
-- **Secure Factory Programming**: Burn factory secret into ESP32 efuse during manufacturing
+### 8. Why No Factory Secret?
+
+**This is a critical design choice** that aligns with standard Bluetooth cross-brand pairing:
+
+1. **Interoperability**: Different manufacturers' devices can pair without prior coordination
+2. **No Key Distribution**: No need to securely distribute factory secrets to manufacturers
+3. **Security Through Proven Crypto**: ECDH is well-studied; security depends on private keys staying private
+4. **Per-Session Keys**: Each pairing generates unique keys; compromise of one doesn't affect others
+
+### 9. Production Security Enhancements
+
+For production deployment:
+- **Secure Key Storage**: Store private key in ESP32 efuse or external secure element (ATECC608A)
 - **Secure Boot**: Enable ESP32 secure boot to prevent firmware tampering
 - **Flash Encryption**: Encrypt flash contents to protect stored keys
-- **Certificate-based Authentication**: Use X.509 certificates for mutual TLS (more complex but stronger)
-- **Secure Element**: Use external secure element (like ATECC608A) for key storage and crypto operations
-- **Over-the-Air (OTA) Updates**: Implement signed OTA updates to ensure firmware integrity
+- **Certificate Pinning**: Consider X.509 certificates for additional verification
+- **OTA Updates**: Implement signed OTA updates
 
-### 7. Security Limitations & Assumptions
-- **Physical Security**: Assides device is in physically secure location; if attacker has physical access, they may extract keys
-- **Side-Channel Attacks**: Implementation not hardened against power analysis or timing attacks (adequate for most home scenarios)
-- **WiFi Security**: Relies on WPA2-PSK for link-layer security; additional encryption provides defense-in-depth
-- **Key Exposure**: If factory secret is extracted from one device, all devices from same batch are compromised (mitigated by unique per-device secrets in production)
+### 10. Security Summary
 
-## Security Summary
 The system provides:
-- ✅ **Device Authentication**: Verified via MAC address and factory-secret-derived keys
-- ✅ **Message Confidentiality**: AES-256-CBC encryption with random IV
-- ✅ **Message Integrity**: HMAC-SHA256 authentication
+
+- ✅ **Device Authentication**: Verified via EC public key signature
+- ✅ **Message Confidentiality**: AES-256-GCM encryption
+- ✅ **Message Integrity**: AES-GCM authentication tag
 - ✅ **Replay Protection**: Timestamp + nonce validation
-- ✅ **Authorization Required**: Explicit user approval needed before device can be controlled
-- ✅ **Forward Secrecy**: Session keys derived per pairing; compromise of one session doesn't affect others
-- ✅ **Defense in Depth**: Multiple security layers working together
+- ✅ **Authorization Required**: Explicit user approval needed
+- ✅ **Forward Secrecy**: New session keys each pairing
+- ✅ **No Pre-Shared Secrets**: Cross-brand compatible like Bluetooth
+- ✅ **Anti-Cloning**: Requires device's private EC key
 
 These measures collectively prevent:
-- Counterfeit devices (cannot derive correct keys without factory secret)
-- Impersonation (requires valid MAC and ability to derive keys)
-- Eavesdropping (AES-256 encryption)
-- Message tampering (HMAC detection)
+- Counterfeit devices (cannot compute shared secret without private key)
+- Impersonation (requires valid EC key pair)
+- Eavesdropping (AES-256-GCM encryption)
+- Message tampering (GCM authentication tag)
 - Replay attacks (timestamp/nonce validation)
-- Unauthorized control (requires explicit authorization step)
+- Man-in-the-middle (user confirms numeric codes)
+- Unauthorized control (requires explicit authorization)

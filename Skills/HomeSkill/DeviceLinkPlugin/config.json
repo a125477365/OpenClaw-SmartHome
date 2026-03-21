@@ -1,9 +1,13 @@
 {
   "devicePort": 8080,
-  "httpPort": 8081,
+  "mdnsPort": 5353,
+  "pairingTimeout": 60000,
+  "portRangeMin": 8080,
+  "portRangeMax": 8100,
+  "enableMdnsDiscovery": true,
   "encryption": {
-    "algorithm": "aes-256-cbc",
+    "algorithm": "aes-256-gcm",
     "keyLength": 32,
-    "ivLength": 16
+    "ivLength": 12
   }
 }

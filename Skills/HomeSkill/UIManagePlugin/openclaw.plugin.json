@@ -1,20 +1,17 @@
 {
   "id": "ui-manage",
-  "name": "智能家居管理界面插件",
-  "version": "1.1.0",
+  "name": "Smart Home Management UI Plugin",
+  "version": "1.2.0",
   "entry": "index.js",
-  "description": "提供网页版设备管理界面，支持查看、编辑、授权设备。包含密码保护，只有主会话可以重置密码。",
+  "description": "Provides web-based device management interface with HTTPS and password protection",
   "type": "web",
-  "services": [
-    "http-server"
-  ],
+  "services": ["http-server"],
   "tools": [
     "ui.password.get",
-    "ui.password.reset"
+    "ui.password.reset",
+    "ui.ports"
   ],
   "dependencies": {
-    "skills": [
-      "home-smart-skill"
-    ]
+    "skills": ["home-smart-skill"]
   }
 }

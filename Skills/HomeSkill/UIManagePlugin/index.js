@@ -1,11 +1,62 @@
 // UIManagePlugin/index.js - Password Protected Version
+// 
+// Features:
+// - HTTPS with auto port selection
+// - Password protected access
+// - Device management UI
+// - Auto SSL certificate generation
+
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const net = require('net');
 const { execSync } = require('child_process');
 
+// Helper: Find available port with fallback
+async function findAvailablePort(startPort, maxPort = startPort + 20) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.listen(startPort, () => {
+      const port = server.address().port;
+      server.close(() => resolve(port));
+    });
+    server.on('error', () => {
+      if (startPort < maxPort) {
+        resolve(findAvailablePort(startPort + 1, maxPort));
+      } else {
+        resolve(null);
+      }
+    });
+  });
+}
+
 module.exports.register = async (api) => {
-  const pluginConfig = require('./config.json');
+  // Load config with defaults
+  const defaultConfig = {
+    httpsPort: 8083,
+    httpPort: 8082,
+    portRangeMin: 8080,
+    portRangeMax: 8100,
+    webRoot: './web',
+    ssl: {
+      key: './ssl/key.pem',
+      cert: './ssl/cert.pem'
+    }
+  };
+  
+  let pluginConfig;
+  try {
+    const configPath = path.join(__dirname, 'config.json');
+    if (fs.existsSync(configPath)) {
+      const loadedConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      pluginConfig = { ...defaultConfig, ...loadedConfig };
+    } else {
+      pluginConfig = defaultConfig;
+    }
+  } catch (e) {
+    api.logger.warn('Failed to load UI config, using defaults: ' + e.message);
+    pluginConfig = defaultConfig;
+  }
   const webRoot = path.join(__dirname, pluginConfig.webRoot);
   const devicesPath = path.join(__dirname, '../../devices.json');
   const passwordPath = path.join(__dirname, 'password.json');
@@ -735,8 +786,21 @@ module.exports.register = async (api) => {
       });
     });
 
-    httpsServer.listen(pluginConfig.httpsPort, () => {
-      api.logger.info(`UI管理HTTPS服务已启动，监听端口：${pluginConfig.httpsPort}`);
+    // Auto port selection with fallback
+  const actualHttpsPort = await findAvailablePort(pluginConfig.httpsPort, pluginConfig.portRangeMax);
+  if (!actualHttpsPort) {
+    api.logger.error('No available HTTPS port');
+    return;
+  }
+
+  const actualHttpPort = await findAvailablePort(pluginConfig.httpPort, pluginConfig.portRangeMax);
+  if (!actualHttpPort) {
+    api.logger.error('No available HTTP port');
+    return;
+  }
+
+  httpsServer.listen(actualHttpsPort, () => {
+      api.logger.info(`UI HTTPS service started on port ${actualHttpsPort}`);
       api.logger.info('UI界面已启用密码保护，请使用主会话查看或重置密码');
     });
   });

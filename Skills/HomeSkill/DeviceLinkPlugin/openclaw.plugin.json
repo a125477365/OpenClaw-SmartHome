@@ -1,23 +1,28 @@
 {
   "id": "device-link",
-  "name": "设备连接与控制插件",
-  "version": "1.0.0",
+  "name": "Device Link and Control Plugin",
+  "version": "2.0.0",
   "entry": "index.js",
-  "description": "负责设备接入、加密通信、文件监听、指令下发与状态上报",
+  "description": "Handles device connection, ECDH pairing, encryption, control, and status reporting",
   "type": "service",
   "tools": [
     "device.control",
-    "device.authorize",
+    "device.pairing.start",
+    "device.pairing.confirm",
+    "device.pairing.reject",
+    "device.reconnect",
     "device.unauthorize",
-    "device.sync"
+    "device.delete",
+    "device.sync",
+    "device.list"
   ],
   "services": [
     "device-listener",
+    "mdns-discovery",
     "file-watcher"
   ],
   "dependencies": {
-    "skills": [
-      "home-smart-skill"
-    ]
+    "skills": ["home-smart-skill"],
+    "npm": ["chokidar@^3.5.3"]
   }
 }

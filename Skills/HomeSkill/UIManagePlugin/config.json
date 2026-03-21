@@ -1,6 +1,8 @@
 {
   "httpsPort": 8083,
   "httpPort": 8082,
+  "portRangeMin": 8080,
+  "portRangeMax": 8100,
   "webRoot": "./web",
   "ssl": {
     "key": "./ssl/key.pem",

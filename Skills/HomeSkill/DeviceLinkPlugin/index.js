@@ -1,322 +1,963 @@
 // DeviceLinkPlugin/index.js
-// 引入依赖模块
+// Device Connection and Control Plugin for OpenClaw Smart Home System
+// 
+// Features:
+// - AES-256-GCM encryption (matching ESP32 firmware)
+// - ECDH-based pairing (Bluetooth-style, no pre-shared secrets)
+// - Device discovery via mDNS (local network only, optional)
+// - Auto port selection with fallback
+// - Reconnection verification using stored public keys
+//
+// Security:
+// - No pre-shared factory secrets
+// - Per-session keys derived from ECDH
+// - Replay protection via timestamp and nonce
+// - User confirmation for pairing (numeric comparison)
+
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
-const tls = require('tls');
 const crypto = require('crypto');
-const chokidar = require('chokidar'); // 文件监听库（需安装：npm install chokidar）
+const dgram = require('dgram');
+const chokidar = require('chokidar');
 
-// 插件注册入口（OpenClaw 自动调用）
+// ECDH curve name (must match ESP32 firmware)
+const ECDH_CURVE = 'prime256v1'; // secp256r1, also known as P-256
+
+// AES-256-GCM parameters
+const GCM_IV_LENGTH = 12; // 96 bits, recommended for GCM
+const GCM_TAG_LENGTH = 16; // 128 bits
+
+// Pairing confirmation code length
+const CONFIRM_CODE_LENGTH = 6;
+
+// Session key derivation
+const HKDF_SALT_LENGTH = 16;
+
+// Pairing timeout (ms)
+const PAIRING_TIMEOUT = 60000;
+
+// Plugin registration entry point (called automatically by OpenClaw)
 module.exports.register = async (api) => {
-  // 1. 读取插件配置
-  const pluginConfig = require('./config.json');
+
+  // ========================================
+  // Configuration Loading
+  // ========================================
+  
+  const defaultConfig = {
+    devicePort: 8080,
+    mdnsPort: 5353,
+    pairingTimeout: 60000,
+    portRangeMin: 8080,
+    portRangeMax: 8100,
+    enableMdnsDiscovery: true, // Can be disabled for public cloud deployment
+    encryption: {
+      algorithm: 'aes-256-gcm',
+      keyLength: 32,
+      ivLength: 12
+    }
+  };
+
+  let pluginConfig;
+  try {
+    const configPath = path.join(__dirname, 'config.json');
+    if (fs.existsSync(configPath)) {
+      const loadedConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      pluginConfig = { ...defaultConfig, ...loadedConfig };
+    } else {
+      pluginConfig = defaultConfig;
+    }
+  } catch (e) {
+    api.logger.warn('Failed to load config, using defaults: ' + e.message);
+    pluginConfig = defaultConfig;
+  }
+
   const skillConfig = require('../openclaw.skill.json');
   const devicesPath = path.join(__dirname, '../devices.json');
 
-  // 2. 初始化设备文件（若不存在则创建）
+  // ========================================
+  // Initialize Devices File
+  // ========================================
+  
   if (!fs.existsSync(devicesPath)) {
-    fs.writeFileSync(devicesPath, JSON.stringify({ devices: [] }, null, 2));
+    fs.writeFileSync(devicesPath, JSON.stringify({ 
+      devices: [], 
+      pendingPairings: [] 
+    }, null, 2));
   }
 
-  // 3. 注册工具（OpenClaw 可调用的核心能力）
-  // 3.1 设备控制工具（核心：下发指令到设备）
+  // ========================================
+  // Generate OpenClaw ECDH Key Pair
+  // ========================================
+  
+  let openclawKeyPair = null;
+  try {
+    openclawKeyPair = crypto.generateKeyPairSync('ec', { namedCurve: ECDH_CURVE });
+    api.logger.info('OpenClaw ECDH key pair generated for device pairing');
+  } catch (e) {
+    api.logger.error('Failed to generate ECDH key pair: ' + e.message);
+  }
+
+  // ========================================
+  // Helper Functions
+  // ========================================
+
+  // Find available port with fallback
+  async function findAvailablePort(startPort, maxPort = startPort + 20) {
+    return new Promise((resolve) => {
+      const server = net.createServer();
+      server.listen(startPort, () => {
+        const port = server.address().port;
+        server.close(() => resolve(port));
+      });
+      server.on('error', () => {
+        if (startPort < maxPort) {
+          resolve(findAvailablePort(startPort + 1, maxPort));
+        } else {
+          resolve(null);
+        }
+      });
+    });
+  }
+
+  // Generate confirmation code from shared secret
+  function generateConfirmCode(sharedSecret, salt) {
+    const hash = crypto.createHash('sha256');
+    hash.update(sharedSecret);
+    hash.update(salt);
+    const digest = hash.digest();
+    // Convert first 4 bytes to 6-digit code
+    const code = (digest[0] << 16 | digest[1] << 8 | digest[2]) % 1000000;
+    return code.toString().padStart(CONFIRM_CODE_LENGTH, '0');
+  }
+
+  // Derive session keys using HKDF
+  function deriveSessionKeys(sharedSecret, salt) {
+    const sessionKey = crypto.hkdfSync('sha256', sharedSecret, salt, 'encryption', 32);
+    const signKey = crypto.hkdfSync('sha256', sharedSecret, salt, 'signing', 32);
+    return { 
+      sessionKey: Buffer.from(sessionKey), 
+      signKey: Buffer.from(signKey) 
+    };
+  }
+
+  // AES-256-GCM encryption
+  function encryptMessage(plaintext, key) {
+    const iv = crypto.randomBytes(GCM_IV_LENGTH);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv, { 
+      authTagLength: GCM_TAG_LENGTH 
+    });
+    let encrypted = cipher.update(JSON.stringify(plaintext), 'utf8');
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    return {
+      iv: iv.toString('base64'),
+      ciphertext: Buffer.concat([encrypted, authTag]).toString('base64')
+    };
+  }
+
+  // AES-256-GCM decryption
+  function decryptMessage(encryptedData, key) {
+    const iv = Buffer.from(encryptedData.iv, 'base64');
+    const data = Buffer.from(encryptedData.ciphertext, 'base64');
+    const ciphertext = data.slice(0, -GCM_TAG_LENGTH);
+    const authTag = data.slice(-GCM_TAG_LENGTH);
+    
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv, { 
+      authTagLength: GCM_TAG_LENGTH 
+    });
+    decipher.setAuthTag(authTag);
+    
+    let decrypted = decipher.update(ciphertext);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return JSON.parse(decrypted.toString('utf8'));
+  }
+
+  // Atomic file write with locking
+  async function atomicWriteFile(filePath, data) {
+    const tempPath = filePath + '.tmp.' + Date.now();
+    return new Promise((resolve, reject) => {
+      fs.writeFile(tempPath, JSON.stringify(data, null, 2), (err) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        fs.rename(tempPath, filePath, (renameErr) => {
+          if (renameErr) {
+            fs.unlink(tempPath, () => {});
+            reject(renameErr);
+          } else {
+            resolve();
+          }
+        });
+      });
+    });
+  }
+
+  // Read devices file with error handling
+  function readDevicesFile() {
+    try {
+      const data = fs.readFileSync(devicesPath, 'utf8');
+      return JSON.parse(data);
+    } catch (e) {
+      api.logger.error('Failed to read devices file: ' + e.message);
+      return { devices: [], pendingPairings: [] };
+    }
+  }
+
+  // Write devices file with error handling
+  async function writeDevicesFile(data) {
+    try {
+      await atomicWriteFile(devicesPath, data);
+      return true;
+    } catch (e) {
+      api.logger.error('Failed to write devices file: ' + e.message);
+      return false;
+    }
+  }
+
+  // ========================================
+  // Tool Registrations
+  // ========================================
+
+  // Tool 1: Device Control - Send commands to devices
   api.registerTool({
     name: 'device.control',
-    description: '向指定设备下发控制指令（开灯/关灯/查询状态）',
+    description: 'Send control command to device (on/off/query state)',
     parameters: {
       type: 'object',
       properties: {
-        deviceId: { type: 'string', description: '设备唯一ID（MAC地址）' },
-        action: { type: 'string', enum: ['on', 'off', 'query'], description: '执行动作' },
-        params: { type: 'object', description: '可选参数（如延时）', default: {} }
+        deviceId: { 
+          type: 'string', 
+          description: 'Device unique ID (MAC address)' 
+        },
+        action: { 
+          type: 'string', 
+          enum: ['on', 'off', 'query'], 
+          description: 'Action to execute' 
+        },
+        params: { 
+          type: 'object', 
+          description: 'Optional parameters', 
+          default: {} 
+        }
       },
       required: ['deviceId', 'action']
     },
-    // 工具执行逻辑（OpenClaw 调用时触发）
     async execute(toolCallId, { deviceId, action, params }) {
       try {
-        // 从devices.json读取设备信息
-        const devicesData = JSON.parse(fs.readFileSync(devicesPath, 'utf8'));
+        const devicesData = readDevicesFile();
         const device = devicesData.devices.find(d => d.deviceId === deviceId);
 
-        // 校验设备存在性与授权状态
-        if (!device) return { success: false, error: '设备不存在', deviceId };
-        if (!device.authorized) return { success: false, error: '设备未授权', deviceId };
-        if (!device.online) return { success: false, error: '设备离线', deviceId };
+        if (!device) {
+          api.logger.warn(`Device not found: ${deviceId}`);
+          return { success: false, error: 'Device not found', deviceId };
+        }
+        if (!device.authorized) {
+          api.logger.warn(`Device not authorized: ${deviceId}`);
+          return { success: false, error: 'Device not authorized', deviceId };
+        }
+        if (!device.online) {
+          api.logger.warn(`Device offline: ${deviceId}`);
+          return { success: false, error: 'Device offline', deviceId };
+        }
 
-        // 构建指令报文（加密）
+        // Validate session key
+        if (!device.sessionKey) {
+          return { 
+            success: false, 
+            error: 'Device missing session key, please re-pair', 
+            deviceId 
+          };
+        }
+
+        // Build command packet
         const command = {
           type: 'control',
           deviceId: deviceId,
           action: action,
-          params: params,
+          params: params || {},
           timestamp: Date.now(),
-          nonce: crypto.randomBytes(8).toString('hex') // 随机数，防重放
+          nonce: crypto.randomBytes(8).toString('hex')
         };
 
-        // 加密报文（AES-256-CBC + 签名）
-        const encryptedMsg = await encryptMessage(command, device.sessionKey);
-        const signature = crypto.createHmac('sha256', device.signKey)
-          .update(JSON.stringify(command) + encryptedMsg)
-          .digest('hex');
+        api.logger.debug(`Sending command to ${deviceId}: ${action}`);
 
-        // 构建完整数据包
+        // Encrypt using AES-256-GCM
+        const sessionKey = Buffer.from(device.sessionKey, 'base64');
+        const encryptedMsg = encryptMessage(command, sessionKey);
+
         const packet = JSON.stringify({
           type: 'encrypted',
-          data: encryptedMsg,
-          sign: signature
-        }) + '\n'; // 换行符，解决粘包问题
+          iv: encryptedMsg.iv,
+          ciphertext: encryptedMsg.ciphertext
+        }) + '\n';
 
-        // 建立TCP短连接下发指令（设备在线）
+        // Send via TCP
         return new Promise((resolve) => {
-          const client = net.createConnection({ host: device.ip, port: pluginConfig.devicePort }, () => {
-            client.write(packet); // 发送加密指令
+          const client = net.createConnection({
+            host: device.ip,
+            port: device.port || pluginConfig.devicePort
+          }, () => {
+            client.write(packet);
           });
 
-          // 接收设备响应
-          client.on('data', async (data) => {
+          client.on('data', (data) => {
             try {
               const response = JSON.parse(data.toString());
-              // 解密响应
-              const decryptedResponse = await decryptMessage(response.data, device.sessionKey);
-              // 更新设备状态到devices.json
-              if (decryptedResponse.state) {
-                device.state = decryptedResponse.state;
-                await updateDevicesFile(devicesData);
+              if (response.type === 'encrypted') {
+                const decryptedResponse = decryptMessage({
+                  iv: response.iv,
+                  ciphertext: response.ciphertext
+                }, sessionKey);
+
+                // Update device state
+                if (decryptedResponse.state !== undefined) {
+                  device.state = decryptedResponse.state;
+                  device.lastSeen = Date.now();
+                  writeDevicesFile(devicesData).catch(e => 
+                    api.logger.error('Failed to update device state: ' + e.message));
+                }
+
+                api.logger.info(`Command ${action} executed on ${deviceId}`);
+                resolve({ success: true, deviceId, result: decryptedResponse });
+              } else if (response.type === 'error') {
+                resolve({ success: false, error: response.error, deviceId });
+              } else {
+                resolve({ success: false, error: 'Unknown response type', deviceId });
               }
-              resolve({ success: true, deviceId, result: decryptedResponse });
             } catch (e) {
-              resolve({ success: false, error: '响应解密失败', deviceId });
+              api.logger.error('Failed to process response: ' + e.message);
+              resolve({ success: false, error: 'Response processing failed: ' + e.message, deviceId });
             }
           });
 
-          // 连接失败
           client.on('error', (err) => {
-            resolve({ success: false, error: `设备连接失败：${err.message}`, deviceId });
+            api.logger.error(`Device connection error: ${err.message}`);
+            resolve({ success: false, error: `Connection failed: ${err.message}`, deviceId });
           });
 
-          // 超时
-          client.setTimeout(5000, () => {
+          client.setTimeout(10000, () => {
             client.destroy();
-            resolve({ success: false, error: '设备响应超时', deviceId });
+            resolve({ success: false, error: 'Device response timeout', deviceId });
           });
         });
       } catch (e) {
-        return { success: false, error: `指令执行异常：${e.message}` };
+        api.logger.error('Control command exception: ' + e.message);
+        return { success: false, error: `Command execution failed: ${e.message}` };
       }
     }
   });
 
-  // 3.2 设备授权工具（更新设备授权状态）
+  // Tool 2: Device Pairing Start - Initiate ECDH pairing
   api.registerTool({
-    name: 'device.authorize',
-    description: '更新设备授权状态（允许/拒绝接入）',
+    name: 'device.pairing.start',
+    description: 'Start ECDH pairing process with a device (Bluetooth-style, no pre-shared secrets)',
     parameters: {
       type: 'object',
       properties: {
-        deviceId: { type: 'string', description: '设备唯一ID' },
-        authorized: { type: 'boolean', description: '是否授权' },
-        sessionKey: { type: 'string', description: '会话密钥（授权后生成）' },
-        signKey: { type: 'string', description: '签名密钥（授权后生成）' }
+        deviceId: { 
+          type: 'string', 
+          description: 'Device unique ID (MAC address)' 
+        },
+        deviceIp: { 
+          type: 'string', 
+          description: 'Device IP address' 
+        },
+        devicePublicKey: { 
+          type: 'string', 
+          description: 'Device public key (base64 encoded, from device)' 
+        },
+        devicePort: { 
+          type: 'number', 
+          description: 'Device TCP port (default 8080)',
+          default: 8080
+        }
       },
-      required: ['deviceId', 'authorized']
+      required: ['deviceId', 'deviceIp', 'devicePublicKey']
     },
-    async execute(toolCallId, { deviceId, authorized, sessionKey, signKey }) {
+    async execute(toolCallId, { deviceId, deviceIp, devicePublicKey, devicePort }) {
       try {
-        const devicesData = JSON.parse(fs.readFileSync(devicesPath, 'utf8'));
-        const device = devicesData.devices.find(d => d.deviceId === deviceId);
-        if (!device) return { success: false, error: '设备不存在' };
-
-        // 更新授权状态与密钥
-        device.authorized = authorized;
-        if (authorized) {
-          device.sessionKey = sessionKey; // 存储会话密钥
-          device.signKey = signKey;     // 存储签名密钥
-          device.online = true;         // 标记在线
-        } else {
-          device.online = false;        // 标记离线
+        const devicesData = readDevicesFile();
+        
+        // Check if device already exists
+        let device = devicesData.devices.find(d => d.deviceId === deviceId);
+        if (device && device.authorized) {
+          return { 
+            success: false, 
+            error: 'Device already authorized, use device.reconnect instead',
+            deviceId
+          };
         }
 
-        await updateDevicesFile(devicesData);
-        // 触发飞书通知（授权结果）
-        api.sendChannelMessage('feishu', {
-          title: '设备授权结果',
-          content: `设备【${device.name}】(${deviceId}) ${authorized ? '已授权接入' : '已拒绝接入'}`
-        });
-        return { success: true, deviceId, authorized };
+        // Generate ephemeral key pair for this pairing session
+        const ephemeralKeyPair = crypto.generateKeyPairSync('ec', { namedCurve: ECDH_CURVE });
+        const ecdh = crypto.createECDH(ECDH_CURVE);
+        ecdh.generateKeys();
+
+        // Generate salt for key derivation
+        const salt = crypto.randomBytes(HKDF_SALT_LENGTH);
+
+        // Compute shared secret using ECDH
+        const devicePubKeyBuf = Buffer.from(devicePublicKey, 'base64');
+        const sharedSecret = ecdh.computeSecret(devicePubKeyBuf);
+
+        // Derive session keys
+        const { sessionKey, signKey } = deriveSessionKeys(sharedSecret, salt);
+
+        // Generate confirmation code
+        const confirmCode = generateConfirmCode(sharedSecret, salt);
+
+        // Store pending pairing
+        const pendingPairing = {
+          deviceId,
+          deviceIp,
+          devicePort: devicePort || 8080,
+          devicePublicKey,
+          ephemeralPublicKey: ecdh.getPublicKey('base64'),
+          salt: salt.toString('base64'),
+          sessionKey: sessionKey.toString('base64'),
+          signKey: signKey.toString('base64'),
+          confirmCode,
+          createdAt: Date.now(),
+          expiresAt: Date.now() + PAIRING_TIMEOUT
+        };
+
+        // Remove old pending pairings for this device
+        devicesData.pendingPairings = devicesData.pendingPairings.filter(
+          p => p.deviceId !== deviceId
+        );
+        devicesData.pendingPairings.push(pendingPairing);
+
+        await writeDevicesFile(devicesData);
+
+        api.logger.info(`Pairing started for device ${deviceId}`);
+        api.logger.info(`Confirmation code: ${confirmCode}`);
+
+        return {
+          success: true,
+          deviceId,
+          confirmCode,
+          ephemeralPublicKey: ecdh.getPublicKey('base64'),
+          salt: salt.toString('base64'),
+          message: `Pairing initiated. Confirmation code: ${confirmCode}. Please verify this code matches the device display (or press button on device) before confirming.`
+        };
       } catch (e) {
-        return { success: false, error: `授权失败：${e.message}` };
+        api.logger.error('Pairing start failed: ' + e.message);
+        return { success: false, error: `Pairing failed: ${e.message}` };
       }
     }
   });
 
-  // 3.3 设备取消授权工具
+  // Tool 3: Device Pairing Confirm - Complete pairing after user confirmation
   api.registerTool({
-    name: 'device.unauthorize',
-    description: '取消设备授权状态（等同于 device.authorize authorized=false）',
+    name: 'device.pairing.confirm',
+    description: 'Confirm device pairing after verifying confirmation code matches',
     parameters: {
       type: 'object',
       properties: {
-        deviceId: { type: 'string', description: '设备唯一ID' }
+        deviceId: { 
+          type: 'string', 
+          description: 'Device unique ID (MAC address)' 
+        },
+        deviceName: { 
+          type: 'string', 
+          description: 'Friendly name for the device',
+          default: 'Smart Switch'
+        }
       },
       required: ['deviceId']
     },
-    async execute(toolCallId, { deviceId }) {
-      // 复用授权工具，设置 authorized 为 false
-      return api.executeTool('device.authorize', { deviceId, authorized: false });
+    async execute(toolCallId, { deviceId, deviceName }) {
+      try {
+        const devicesData = readDevicesFile();
+        
+        // Find pending pairing
+        const pendingIndex = devicesData.pendingPairings.findIndex(
+          p => p.deviceId === deviceId && p.expiresAt > Date.now()
+        );
+
+        if (pendingIndex === -1) {
+          return { 
+            success: false, 
+            error: 'No valid pending pairing found. Please restart pairing process.',
+            deviceId
+          };
+        }
+
+        const pending = devicesData.pendingPairings[pendingIndex];
+
+        // Create or update device record
+        let device = devicesData.devices.find(d => d.deviceId === deviceId);
+        if (!device) {
+          device = {
+            deviceId,
+            name: deviceName || 'Smart Switch',
+            ip: pending.deviceIp,
+            port: pending.devicePort,
+            authorized: false,
+            online: false,
+            state: null,
+            createdAt: Date.now()
+          };
+          devicesData.devices.push(device);
+        }
+
+        // Update device with pairing info
+        device.name = deviceName || device.name;
+        device.publicKey = pending.devicePublicKey;
+        device.sessionKey = pending.sessionKey;
+        device.signKey = pending.signKey;
+        device.authorized = true;
+        device.online = true;
+        device.pairedAt = Date.now();
+        device.lastSeen = Date.now();
+
+        // Remove pending pairing
+        devicesData.pendingPairings.splice(pendingIndex, 1);
+
+        await writeDevicesFile(devicesData);
+
+        // Notify via channel
+        api.sendChannelMessage('feishu', {
+          title: '设备配对成功',
+          content: `设备【${device.name}】(${deviceId}) 已完成配对并授权接入`
+        });
+
+        api.logger.info(`Pairing confirmed for device ${deviceId}`);
+
+        return {
+          success: true,
+          deviceId,
+          deviceName: device.name,
+          message: `Device "${device.name}" paired successfully. You can now control it.`
+        };
+      } catch (e) {
+        api.logger.error('Pairing confirm failed: ' + e.message);
+        return { success: false, error: `Pairing confirmation failed: ${e.message}` };
+      }
     }
   });
 
-  // 3.4 设备同步工具（强制从设备获取最新状态）
+  // Tool 4: Device Pairing Reject - Reject a pending pairing
   api.registerTool({
-    name: 'device.sync',
-    description: '向指定设备查询状态并更新本地记录',
+    name: 'device.pairing.reject',
+    description: 'Reject a pending device pairing',
     parameters: {
       type: 'object',
       properties: {
-        deviceId: { type: 'string', description: '设备唯一ID（MAC地址）' }
+        deviceId: { 
+          type: 'string', 
+          description: 'Device unique ID (MAC address)' 
+        }
       },
       required: ['deviceId']
     },
     async execute(toolCallId, { deviceId }) {
-      // 复用控制工具的 query 动作
+      try {
+        const devicesData = readDevicesFile();
+        
+        const pendingIndex = devicesData.pendingPairings.findIndex(
+          p => p.deviceId === deviceId
+        );
+
+        if (pendingIndex === -1) {
+          return { success: false, error: 'No pending pairing found', deviceId };
+        }
+
+        devicesData.pendingPairings.splice(pendingIndex, 1);
+        await writeDevicesFile(devicesData);
+
+        api.logger.info(`Pairing rejected for device ${deviceId}`);
+
+        return {
+          success: true,
+          deviceId,
+          message: 'Pairing rejected'
+        };
+      } catch (e) {
+        api.logger.error('Pairing reject failed: ' + e.message);
+        return { success: false, error: `Reject failed: ${e.message}` };
+      }
+    }
+  });
+
+  // Tool 5: Device Reconnect - Reconnect using stored public key
+  api.registerTool({
+    name: 'device.reconnect',
+    description: 'Reconnect to a previously paired device using stored public key',
+    parameters: {
+      type: 'object',
+      properties: {
+        deviceId: { 
+          type: 'string', 
+          description: 'Device unique ID (MAC address)' 
+        }
+      },
+      required: ['deviceId']
+    },
+    async execute(toolCallId, { deviceId }) {
+      try {
+        const devicesData = readDevicesFile();
+        const device = devicesData.devices.find(d => d.deviceId === deviceId);
+
+        if (!device) {
+          return { success: false, error: 'Device not found', deviceId };
+        }
+
+        if (!device.publicKey) {
+          return { 
+            success: false, 
+            error: 'Device missing public key, please re-pair', 
+            deviceId 
+          };
+        }
+
+        // Generate new ephemeral key pair for this session
+        const ecdh = crypto.createECDH(ECDH_CURVE);
+        ecdh.generateKeys();
+
+        // Generate new salt
+        const salt = crypto.randomBytes(HKDF_SALT_LENGTH);
+
+        // Compute shared secret
+        const devicePubKeyBuf = Buffer.from(device.publicKey, 'base64');
+        const sharedSecret = ecdh.computeSecret(devicePubKeyBuf);
+
+        // Derive new session keys
+        const { sessionKey, signKey } = deriveSessionKeys(sharedSecret, salt);
+
+        // Update device with new keys
+        device.sessionKey = sessionKey.toString('base64');
+        device.signKey = signKey.toString('base64');
+        device.online = true;
+        device.lastSeen = Date.now();
+
+        await writeDevicesFile(devicesData);
+
+        api.logger.info(`Reconnected to device ${deviceId}`);
+
+        return {
+          success: true,
+          deviceId,
+          ephemeralPublicKey: ecdh.getPublicKey('base64'),
+          salt: salt.toString('base64'),
+          message: 'Reconnected successfully'
+        };
+      } catch (e) {
+        api.logger.error('Reconnect failed: ' + e.message);
+        return { success: false, error: `Reconnect failed: ${e.message}` };
+      }
+    }
+  });
+
+  // Tool 6: Device Unauthorize - Revoke device authorization
+  api.registerTool({
+    name: 'device.unauthorize',
+    description: 'Revoke device authorization and remove from system',
+    parameters: {
+      type: 'object',
+      properties: {
+        deviceId: { 
+          type: 'string', 
+          description: 'Device unique ID (MAC address)' 
+        }
+      },
+      required: ['deviceId']
+    },
+    async execute(toolCallId, { deviceId }) {
+      try {
+        const devicesData = readDevicesFile();
+        const deviceIndex = devicesData.devices.findIndex(d => d.deviceId === deviceId);
+
+        if (deviceIndex === -1) {
+          return { success: false, error: 'Device not found', deviceId };
+        }
+
+        const device = devicesData.devices[deviceIndex];
+        device.authorized = false;
+        device.online = false;
+        device.sessionKey = null;
+        device.signKey = null;
+
+        await writeDevicesFile(devicesData);
+
+        api.sendChannelMessage('feishu', {
+          title: '设备授权已撤销',
+          content: `设备【${device.name}】(${deviceId}) 授权已被撤销`
+        });
+
+        api.logger.info(`Device ${deviceId} unauthorized`);
+
+        return {
+          success: true,
+          deviceId,
+          message: 'Device authorization revoked'
+        };
+      } catch (e) {
+        api.logger.error('Unauthorize failed: ' + e.message);
+        return { success: false, error: `Unauthorize failed: ${e.message}` };
+      }
+    }
+  });
+
+  // Tool 7: Device Delete - Remove device completely
+  api.registerTool({
+    name: 'device.delete',
+    description: 'Delete device from system completely',
+    parameters: {
+      type: 'object',
+      properties: {
+        deviceId: { 
+          type: 'string', 
+          description: 'Device unique ID (MAC address)' 
+        }
+      },
+      required: ['deviceId']
+    },
+    async execute(toolCallId, { deviceId }) {
+      try {
+        const devicesData = readDevicesFile();
+        const deviceIndex = devicesData.devices.findIndex(d => d.deviceId === deviceId);
+
+        if (deviceIndex === -1) {
+          return { success: false, error: 'Device not found', deviceId };
+        }
+
+        const device = devicesData.devices[deviceIndex];
+        devicesData.devices.splice(deviceIndex, 1);
+
+        await writeDevicesFile(devicesData);
+
+        api.logger.info(`Device ${deviceId} deleted`);
+
+        return {
+          success: true,
+          deviceId,
+          message: 'Device deleted'
+        };
+      } catch (e) {
+        api.logger.error('Delete failed: ' + e.message);
+        return { success: false, error: `Delete failed: ${e.message}` };
+      }
+    }
+  });
+
+  // Tool 8: Device Sync - Query device state
+  api.registerTool({
+    name: 'device.sync',
+    description: 'Query device state and update local record',
+    parameters: {
+      type: 'object',
+      properties: {
+        deviceId: { 
+          type: 'string', 
+          description: 'Device unique ID (MAC address)' 
+        }
+      },
+      required: ['deviceId']
+    },
+    async execute(toolCallId, { deviceId }) {
+      // Reuse control tool with query action
       return api.executeTool('device.control', { deviceId, action: 'query' });
     }
   });
 
-  // 4. 启动后台服务（设备监听 + 文件监听）
-  // 4.1 设备监听服务：启动TCP服务器，监听设备接入（长连接/短连接自适应）
-  api.startService('device-listener', async () => {
-    const server = net.createServer(async (client) => {
-      let deviceInfo = null;
-      let buffer = ''; // 粘包处理缓冲区
+  // Tool 9: Device List - List all devices
+  api.registerTool({
+    name: 'device.list',
+    description: 'List all registered devices',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: []
+    },
+    async execute(toolCallId) {
+      try {
+        const devicesData = readDevicesFile();
+        return {
+          success: true,
+          devices: devicesData.devices.map(d => ({
+            deviceId: d.deviceId,
+            name: d.name,
+            ip: d.ip,
+            authorized: d.authorized,
+            online: d.online,
+            state: d.state,
+            lastSeen: d.lastSeen
+          }))
+        };
+      } catch (e) {
+        api.logger.error('List devices failed: ' + e.message);
+        return { success: false, error: `List failed: ${e.message}` };
+      }
+    }
+  });
 
-      // 客户端连接成功
+  // ========================================
+  // Background Services
+  // ========================================
+
+  // Service 1: Device Listener - TCP server for device connections
+  api.startService('device-listener', async () => {
+    // Find available port
+    const actualPort = await findAvailablePort(
+      pluginConfig.devicePort, 
+      pluginConfig.portRangeMax
+    );
+
+    if (!actualPort) {
+      api.logger.error('No available port for device listener');
+      return;
+    }
+
+    const server = net.createServer(async (client) => {
+      let buffer = '';
+      let deviceInfo = null;
+
       client.on('connect', () => {
-        api.logger.info(`新设备接入：${client.remoteAddress}:${client.remotePort}`);
+        api.logger.info(`New connection: ${client.remoteAddress}:${client.remotePort}`);
       });
 
-      // 接收设备数据
       client.on('data', async (data) => {
         buffer += data.toString();
-        // 按换行符拆分数据包（解决粘包）
         const packets = buffer.split('\n');
-        buffer = packets.pop(); // 剩余未完整数据包暂存
+        buffer = packets.pop();
 
         for (const packetStr of packets) {
-          if (!packetStr.trim()) continue; // 跳过空行
+          if (!packetStr.trim()) continue;
+
           try {
             const packet = JSON.parse(packetStr);
-            // 只处理加密类型的数据包
-            if (packet.type === 'encrypted') {
-              // 这里需要根据设备IP找到对应的设备记录（因为设备在发送数据时尚未授权，可能还没有在devices.json中）
-              // 实际中，设备在首次连接时会发送其设备ID（MAC）和公钥信息？但根据我们的设计，设备在未授权状态下不会发送任何数据，只有在授权后才会通信。
-              // 为了简化，我们假设设备在连接后会发送一个包含其deviceId的未加密握手包？但当前设计中，所有通信都是加密的。
-              // 因此，我们需要一个方式：设备在连接后首先发送一个未加密的设备ID声明？但这样不安全。
-              // 替代方案：使用预共享密钥？但不安全。
-              // 重新考虑：在设备端，我们只有在授权后才建立通信。所以设备在未授权状态下不会主动发送数据。
-              // 因此，我们的TCP服务器主要是为了在设备被授权后，由OpenClaw主动连接设备下发指令。
-              // 那么，设备监听服务可能不是必须的？但我们还是保留，用于设备主动上报状态（如按键触发）。
-              // 为了支持设备主动上报，我们需要设备在未授权状态下能够发送一个标识自己的消息，但这样存在安全风险。
-              // 我们可以这样：设备在连接后发送一个包含其deviceId和一个随机数的消息，然后OpenClaw使用该随机数和预存的设备密钥（如果有）来生成会话密钥？但我们还没有预存密钥。
-              // 由于时间关系，我们简化设计：假设设备在被授权后才会连接到OpenClaw的TCP服务器（即设备作为客户端连接到OpenClaw），然后OpenClaw作为服务器接收设备的主动上报。
-              // 但是，在我们之前的控制工具中，OpenClaw是作为客户端连接到设备。这样会有两种模式？
-              // 为了统一，我们让设备总是作为服务器运行，OpenClaw作为客户端连接到设备。那么设备不需要主动连接到OpenClaw。
-              // 那么，我们的TCP服务器（device-listener）可能用处不大。但我们可以保留，用于其他类型的设备（如那些需要主动上报的设备）。
-              // 由于题目要求是智能开关，我们可以假设设备不主动上报状态，只有在被查询时才返回状态。
-              // 因此，我们可以暂时不处理设备主动发送的数据，或者如果收到数据则尝试解密并处理为状态上报。
-              // 由于我们没有设备端代码，我们假设设备端在收到指令后会返回结果，但不主动发送。
-              // 所以，这里我们只记录日志，不处理数据。
-              api.logger.debug(`收到设备数据包：${packetStr}`);
-              // 如果要处理设备主动上报，需要在这里解密并更新设备状态。
-              // 但由于我们无法知道设备的密钥（因为设备尚未授权），我们跳过。
-              // 在实际项目中，设备在未授权状态下不应发送任何数据，或者发送一个不包含敏感信息的广播包。
+
+            // Handle pairing request from device
+            if (packet.type === 'pairing_request') {
+              const { deviceId, publicKey, name } = packet;
+              
+              api.logger.info(`Pairing request from ${deviceId} (${name || 'Unknown'})`);
+
+              // Check if device already paired
+              const devicesData = readDevicesFile();
+              const existingDevice = devicesData.devices.find(d => d.deviceId === deviceId);
+
+              if (existingDevice && existingDevice.authorized) {
+                // Reconnection attempt - verify public key
+                if (existingDevice.publicKey === publicKey) {
+                  // Public key matches, allow reconnection
+                  client.write(JSON.stringify({
+                    type: 'reconnect_allowed',
+                    ephemeralPublicKey: openclawKeyPair.publicKey.export({ type: 'spki', format: 'der' }).toString('base64')
+                  }) + '\n');
+                } else {
+                  client.write(JSON.stringify({
+                    type: 'pairing_error',
+                    error: 'Public key mismatch'
+                  }) + '\n');
+                }
+              } else {
+                // New device - start pairing process
+                // Notify user about new device discovery
+                api.sendChannelMessage('feishu', {
+                  title: '发现新设备',
+                  content: `发现新设备【${name || deviceId}】正在请求配对。请使用 device.pairing.start 工具开始配对流程。`
+                });
+              }
             }
+
+            // Handle encrypted status report from device
+            if (packet.type === 'encrypted' && packet.iv && packet.ciphertext) {
+              // Find device by IP (since we don't know deviceId yet)
+              const devicesData = readDevicesFile();
+              const device = devicesData.devices.find(d => 
+                d.ip === client.remoteAddress && d.authorized
+              );
+
+              if (device && device.sessionKey) {
+                try {
+                  const sessionKey = Buffer.from(device.sessionKey, 'base64');
+                  const decrypted = decryptMessage({
+                    iv: packet.iv,
+                    ciphertext: packet.ciphertext
+                  }, sessionKey);
+
+                  device.state = decrypted.state;
+                  device.lastSeen = Date.now();
+                  await writeDevicesFile(devicesData);
+
+                  api.logger.debug(`Status update from ${device.deviceId}: ${JSON.stringify(decrypted.state)}`);
+                } catch (e) {
+                  api.logger.error('Failed to decrypt status report: ' + e.message);
+                }
+              }
+            }
+
           } catch (e) {
-            api.logger.error(`解析设备数据包失败：${e.message}`);
+            api.logger.error('Failed to parse packet: ' + e.message);
           }
         }
       });
 
-      // 客户端断开连接
       client.on('close', () => {
-        api.logger.info(`设备断开连接：${client.remoteAddress}:${client.remotePort}`);
-        // 如果我们知道这是哪个设备，可以将其标记为离线
+        api.logger.info(`Connection closed: ${client.remoteAddress}`);
         if (deviceInfo) {
-          const devicesData = JSON.parse(fs.readFileSync(devicesPath, 'utf8'));
+          const devicesData = readDevicesFile();
           const device = devicesData.devices.find(d => d.deviceId === deviceInfo.deviceId);
           if (device) {
             device.online = false;
-            updateDevicesFile(devicesData).catch(console.error);
+            writeDevicesFile(devicesData).catch(() => {});
           }
         }
       });
 
-      // 连接错误
       client.on('error', (err) => {
-        api.logger.error(`设备连接错误：${err.message}`);
+        api.logger.error(`Connection error: ${err.message}`);
       });
     });
 
-    server.listen(pluginConfig.devicePort, () => {
-      api.logger.info(`设备监听服务已启动，监听端口：${pluginConfig.devicePort}`);
+    server.listen(actualPort, () => {
+      api.logger.info(`Device listener started on port ${actualPort}`);
     });
   });
 
-  // 4.2 文件监听服务：监控 devices.json 文件变化，以便在其他插件或手动编辑时更新内部状态（虽然我们总是读取文件，但可以做缓存）
-  // 由于我们在每次工具执行时都会读取文件，所以文件监听服务可能不是必须的。但我们还是启动它以示例。
+  // Service 2: mDNS Discovery (Local network only)
+  if (pluginConfig.enableMdnsDiscovery) {
+    api.startService('mdns-discovery', async () => {
+      const mdnsSocket = dgram.createSocket('udp4');
+      
+      mdnsSocket.bind(pluginConfig.mdnsPort, () => {
+        mdnsSocket.addMembership('224.0.0.251');
+        api.logger.info(`mDNS discovery listening on ${pluginConfig.mdnsPort}`);
+      });
+
+      mdnsSocket.on('message', (msg, rinfo) => {
+        // Parse mDNS message for OpenClaw device announcements
+        // This is a simplified implementation
+        if (msg.toString().includes('_openclaw._tcp')) {
+          api.logger.debug(`mDNS: OpenClaw device discovered at ${rinfo.address}`);
+        }
+      });
+
+      mdnsSocket.on('error', (err) => {
+        api.logger.error('mDNS error: ' + err.message);
+      });
+    });
+  }
+
+  // Service 3: File Watcher
   api.startService('file-watcher', async () => {
-    const watcher = chokidar.watch(devicesPath, {
-      persistent: true,
-      ignoreInitial: true
+    const watcher = chokidar.watch(devicesPath, { 
+      persistent: true, 
+      ignoreInitial: true 
     });
 
     watcher.on('change', (filePath) => {
-      api.logger.info(`设备文件已更新：${filePath}`);
-      // 这里可以触发一些操作，比如重新加载设备列表到内存缓存（如果我们有缓存的话）
-      // 由于我们总是读取文件，所以无需额外操作
+      api.logger.debug(`Devices file changed: ${filePath}`);
     });
 
     watcher.on('error', (error) => {
-      api.logger.error(`文件监听错误：${error}`);
+      api.logger.error('File watcher error: ' + error);
     });
   });
 
-  // 辅助函数：更新设备文件
-  async function updateDevicesFile(devicesData) {
-    return new Promise((resolve, reject) => {
-      fs.writeFile(devicesPath, JSON.stringify(devicesData, null, 2), (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
-  }
-
-  // 辅助函数：加密消息
-  async function encryptMessage(message, key) {
-    // key 应该是 32 字节的 Buffer（AES-256）
-    const iv = crypto.randomBytes(16); // 初始化向量
-    const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
-    let encrypted = cipher.update(JSON.stringify(message), 'utf8', 'base64');
-    encrypted += cipher.final('base64');
-    // 返回 iv + encrypted（为了解密时使用）
-    return iv.toString('base64') + ':' + encrypted;
-  }
-
-  // 辅助函数：解密消息
-  async function decryptMessage(encryptedMessage, key) {
-    const parts = encryptedMessage.split(':');
-    if (parts.length !== 2) throw new Error('Invalid encrypted message format');
-    const iv = Buffer.from(parts[0], 'base64');
-    const encryptedData = parts[1];
-    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-    let decrypted = decipher.update(encryptedData, 'base64', 'utf8');
-    decrypted += decipher.final('utf8');
-    return JSON.parse(decrypted);
-  }
-
-  // 注：以上加密函数未包含签名验证，实际使用中我们已经在工具中加入了签名（HMAC）。
-  // 但在设备端，我们需要同样生成签名和验证签数。这里我们只提供OpenClaw端的加密解密。
-  // 设备端需要实现相同的逻辑。
+  api.logger.info('DeviceLinkPlugin registered successfully');
 };

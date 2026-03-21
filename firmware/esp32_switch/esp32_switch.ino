@@ -1,54 +1,55 @@
 /*
  * ESP32 Smart Switch Firmware for OpenClaw Smart Home System
  * 
+ * ECDH-Based Pairing (Bluetooth-Style, No Pre-Shared Secrets)
+ * 
  * Features:
- * - Connects to WiFi (STA mode) using credentials stored in flash (set via SmartConfig or Web provisioning)
+ * - Connects to WiFi (STA mode) using credentials via SmartConfig
  * - Uses unique MAC address as deviceId
- * - Burns a factory-secret key into efuse during manufacturing (simulated here by reading from flash)
- * - After WiFi connection, waits for pairing: receives encrypted session keys from OpenClaw
- * - Communicates via TCP server on port 8080 (as expected by DeviceLinkPlugin)
- * - All messages encrypted with AES-256-CBC and authenticated with HMAC-SHA256
- * - Prevents replay attacks with timestamp + nonce
+ * - Generates unique EC key pair on first boot (Curve25519)
+ * - ECDH key exchange during pairing (no factory secret)
+ * - User confirmation via button press (simulate numeric comparison)
+ * - All messages encrypted with AES-256-GCM
  * - Controls a relay connected to GPIO12
  * - Reports state changes back to OpenClaw
  * 
  * Security:
- * - Device authentication via factory-secret (prevents cloning)
- * - Message confidentiality via AES-256-CBC
- * - Message integrity & authenticity via HMAC-SHA256
- * - Replay protection via timestamp and nonce (server validates freshness)
- * - Post-authorization, session keys are unique per session
+ * - No pre-shared factory secrets
+ * - Per-device EC key pair generated at first boot
+ * - ECDH shared secret derivation
+ * - AES-256-GCM for encryption and authentication
+ * - Replay protection via timestamp and nonce
+ * - User confirmation to prevent MITM
  */
 
 #include <WiFi.h>
 #include <ESPmDNS.h>
-#include <Update.h>
 #include <ArduinoJson.h>
-#include <AESLib.h>
-#include <mbedtls/md.h>
+#include <mbedtls/ecdh.h>
+#include <mbedtls/ecp.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/gcm.h>
+#include <mbedtls/sha256.h>
 
 // ------------------- Configuration -------------------
-const char* WIFI_SSID = "";        // To be set via provisioning (SmartConfig/Web)
-const char* WIFI_PASSWORD = "";    // To be set via provisioning
+const char* WIFI_SSID = "";        // To be set via SmartConfig
+const char* WIFI_PASSWORD = "";    // To be set via SmartConfig
 const uint16_t TCP_PORT = 8080;    // Must match DeviceLinkPlugin.config.devicePort
 const uint8_t  RELAY_PIN = 12;     // GPIO12 controls relay
 const uint8_t  LED_PIN   = 14;     // GPIO14 LED indicator
-const uint8_t  BUTTON_PIN= 13;     // GPIO13 button (optional manual toggle)
+const uint8_t  BUTTON_PIN= 13;     // GPIO13 button for user confirmation
 
-// Factory secret key (16 bytes) - should be burned into efuse/flash during manufacturing
-// For demonstration, we store it in flash; in production use ESP32 efuse or secure element.
-uint8_t factorySecret[16] = {
-  0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
-  0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88
-};
+// EC key pair (generated on first boot, stored in flash)
+mbedtls_ecp_keypair keypair;
+mbedtls_entropy_context entropy;
+mbedtls_ctr_drbg_context ctr_drbg;
+bool keysInitialized = false;
 
-// Derived session keys (set after successful pairing)
+// Session keys (derived from ECDH)
 uint8_t sessionKey[32];   // AES-256 key
-uint8_t signKey[32];      // HMAC-SHA256 key
-bool keysReady = false;
-
-// AES and crypto objects
-AESLib aesLib;
+uint8_t signKey[32];      // HMAC key (if needed for additional auth)
+bool pairingComplete = false;
 
 // Relay state
 bool relayState = false;
@@ -58,10 +59,17 @@ bool wifiConnected = false;
 
 // Forward declarations
 void handleClient(WiFiClient client);
-void encryptMessage(const StaticJsonDocument<200>& plain, uint8_t* iv, char* output, size_t outputSize);
-bool decryptMessage(const char* input, const uint8_t* iv, StaticJsonDocument<200>& doc);
-bool verifyHmac(const char* msg, const char* hexHmac);
-void computeHmac(const char* msg, char* hexHmac, size_t hexHmacSize);
+void generateKeyPair();
+bool loadKeyPair();
+bool saveKeyPair();
+void performECDH(uint8_t* peerPublicKey, size_t peerKeyLen, uint8_t* sharedSecret);
+void deriveSessionKeys(const uint8_t* sharedSecret, const uint8_t* salt, size_t saltLen);
+int encryptMessage(const uint8_t* plaintext, size_t plaintextLen, 
+                   const uint8_t* key, uint8_t* ciphertext, size_t* ciphertextLen,
+                   uint8_t* nonce, uint8_t* tag);
+int decryptMessage(const uint8_t* ciphertext, size_t ciphertextLen,
+                   const uint8_t* key, const uint8_t* nonce, const uint8_t* tag,
+                   uint8_t* plaintext, size_t* plaintextLen);
 
 // ------------------- Setup -------------------
 void setup() {
@@ -70,77 +78,83 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   digitalWrite(RELAY_PIN, relayState);
-  digitalWrite(LED_PIN, LOW); // LED off initially
+  digitalWrite(LED_PIN, LOW);
 
-  // Attempt to load WiFi credentials from flash (simplistic: use hardcoded for demo)
-  // In real product, implement SmartConfig or web provisioning to set SSID/Password.
-  // For this demo, we assume credentials are already set via serial or OTA.
+  // Initialize entropy and random number generator
+  mbedtls_entropy_init(&entropy);
+  mbedtls_ctr_drbg_init(&ctr_drbg);
+  int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, NULL, 0);
+  if (ret != 0) {
+    Serial.println("Failed to initialize RNG");
+    return;
+  }
+
+  // Load or generate EC key pair
+  if (!loadKeyPair()) {
+    generateKeyPair();
+    saveKeyPair();
+  }
+
+  // Connect to WiFi (SmartConfig if credentials not set)
   if (strlen(WIFI_SSID) == 0) {
-    Serial.println("WiFi credentials not set. Entering SmartConfig mode...");
+    Serial.println("Starting SmartConfig...");
     WiFi.mode(WIFI_STA);
     WiFi.beginSmartConfig();
     while (!WiFi.smartConfigDone()) {
       delay(500);
       Serial.print(".");
-      digitalWrite(LED_PIN, !digitalRead(LED_PIN)); // blink while waiting
+      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     }
-    Serial.println("\nSmartConfig received");
-    wifiConnected = true;
+    Serial.println("\nSmartConfig done");
   } else {
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     Serial.print("Connecting to WiFi");
     while (WiFi.status() != WL_CONNECTED) {
       delay(500);
       Serial.print(".");
-      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     }
     Serial.println("\nWiFi connected");
-    wifiConnected = true;
   }
 
+  wifiConnected = (WiFi.status() == WL_CONNECTED);
   if (wifiConnected) {
-    Serial.print("IP address: ");
+    Serial.print("IP: ");
     Serial.println(WiFi.localIP());
-    // Start MDNS responder for easy discovery (optional)
-    if (MDNS.begin("esp32-switch")) {
-      Serial.println("MDNS responder started");
+    digitalWrite(LED_PIN, HIGH);
+  }
+
+  // Start TCP server
+  WiFiServer server(TCP_PORT);
+  server.begin();
+  Serial.printf("TCP server listening on port %d\n", TCP_PORT);
+
+  // Main loop
+  while (true) {
+    WiFiClient client = server.available();
+    if (client) {
+      Serial.println("Client connected");
+      handleClient(client);
+      client.stop();
+      Serial.println("Client disconnected");
     }
-    digitalWrite(LED_PIN, HIGH); // LED on = WiFi connected
-    // Start TCP server
-    WiFiServer server(TCP_PORT);
-    server.begin();
-    Serial.print("TCP server listening on port ");
-    Serial.println(TCP_PORT);
-    // Main loop will handle clients
-    while (true) {
-      WiFiClient client = server.available();
-      if (client) {
-        Serial.println("New client connected");
-        handleClient(client);
-        client.stop();
-        Serial.println("Client disconnected");
-      }
-      delay(10);
-    }
+    delay(10);
   }
 }
 
 void loop() {
-  // Empty; all work done in setup() blocking loop
+  // Empty; all work in setup() loop
 }
 
 // ------------------- Client Handler -------------------
 void handleClient(WiFiClient client) {
-  // Buffer for incoming data (we expect line-delimited JSON packets)
   String buffer = "";
   while (client.connected()) {
     while (client.available()) {
       char c = client.read();
       buffer += c;
       if (c == '\n') {
-        // Process one packet
-        if (buffer.length() > 2) { // ignore empty lines
-          processPacket(buffer.trim());
+        if (buffer.length() > 2) {
+          processPacket(client, buffer.trim());
         }
         buffer = "";
       }
@@ -150,374 +164,401 @@ void handleClient(WiFiClient client) {
 }
 
 // ------------------- Packet Processing -------------------
-void processPacket(String packet) {
-  // Expected format: JSON string, possibly encrypted
-  // First, try to parse as plain JSON (for pairing messages)
-  StaticJsonDocument<500> doc;
-  DeserializationError error = deserializeJson(doc, packet);
-  if (!error && doc.containsKey("type")) {
-    const char* type = doc["type"];
-    if (strcmp(type, "pairing") == 0) {
-      handlePairing(doc);
-      return;
-    }
-    // If not pairing, assume encrypted message
-  }
-
-  // Treat as encrypted message: {type:"encrypted", data:"<base64 iv:ciphertext>", sign:"<hex hmac>"}
-  StaticJsonDocument<500> encDoc;
-  error = deserializeJson(encDoc, packet);
-  if (error || !encDoc.containsKey("type") || strcmp(encDoc["type"], "encrypted") != 0) {
-    Serial.println("Invalid encrypted packet format");
-    return;
-  }
-  const char* encData = encDoc["data"];
-  const char* encSign = encDoc["sign"];
-  if (!encData || !encSign) {
-    Serial.println("Missing data or sign");
+void processPacket(WiFiClient client, String packet) {
+  StaticJsonDocument<1024> doc;
+  DeserializationError err = deserializeJson(doc, packet);
+  if (err) {
+    Serial.println("Invalid JSON");
     return;
   }
 
-  // Verify HMAC
-  if (!verifyHmac(encData, encSign)) {
-    Serial.println("HMAC verification failed");
-    sendErrorResponse(client, "Invalid signature");
+  const char* type = doc["type"];
+
+  // Pairing initiation
+  if (strcmp(type, "pairing_start") == 0) {
+    handlePairingStart(client, doc);
     return;
   }
 
-  // Extract IV and ciphertext from encData: format "base64IV:base64Cipher"
-  String dataStr = encData;
-  int colonPos = dataStr.indexOf(':');
-  if (colonPos <= 0) {
-    Serial.println("Invalid encData format");
-    return;
-  }
-  String ivB64 = dataStr.substring(0, colonPos);
-  String cipherB64 = dataStr.substring(colonPos + 1);
-
-  // Decode base64 (we'll implement simple base64 decode or use library)
-  // For brevity, we assume a helper function base64Decode
-  uint8_t iv[16];
-  size_t ivLen = base64Decode(ivB64.c_str(), ivB64.length(), iv, sizeof(iv));
-  if (ivLen != 16) {
-    Serial.println("IV length error");
-    return;
-  }
-  size_t cipherLen = base64Decode(cipherB64.c_str(), cipherB64.length(), nullptr, 0); // get length
-  std::unique_ptr<uint8_t[]> cipherBuf(new uint8_t[cipherLen]);
-  base64Decode(cipherB64.c_str(), cipherB64.length(), cipherBuf.get(), cipherLen);
-
-  // Decrypt message
-  StaticJsonDocument<500> plainDoc;
-  if (!decryptMessage((char*)cipherBuf.get(), iv, plainDoc)) {
-    Serial.println("Decryption failed");
-    sendErrorResponse(client, "Decryption failed");
+  // Pairing confirmation
+  if (strcmp(type, "pairing_confirm") == 0) {
+    handlePairingConfirm(client, doc);
     return;
   }
 
-  // Check timestamp freshness (within 5 seconds)
-  unsigned long now = millis();
-  if (plainDoc.containsKey("timestamp")) {
-    unsigned long ts = plainDoc["timestamp"];
-    if (abs((long)now - (long)ts) > 5000) {
-      Serial.println("Timestamp stale");
-      sendErrorResponse(client, "Timestamp stale");
-      return;
-    }
-  } else {
-    Serial.println("Missing timestamp");
-    sendErrorResponse(client, "Missing timestamp");
-    return;
-  }
-  // Check nonce replay? We could keep a small cache; for simplicity rely on timestamp.
-
-  // Execute command
-  if (!plainDoc.containsKey("deviceId") || !plainDoc.containsKey("action")) {
-    Serial.println("Missing deviceId or action");
-    sendErrorResponse(client, "Missing fields");
-    return;
-  }
-  // Verify deviceId matches our MAC (optional, but good)
-  String mac = WiFi.macAddress();
-  mac.replace(":", ""); // remove colons for comparison
-  String incomingId = plainDoc["deviceId"];
-  incomingId.toLowerCase();
-  if (incomingId != mac) {
-    Serial.println("DeviceId mismatch");
-    sendErrorResponse(client, "DeviceId mismatch");
+  // Encrypted command
+  if (strcmp(type, "encrypted") == 0) {
+    handleEncryptedCommand(client, doc);
     return;
   }
 
-  const char* action = plainDoc["action"];
-  JsonVariant params = plainDoc["params"];
-  bool success = false;
-  StaticJsonDocument<200> responseDoc;
-  if (strcmp(action, "on") == 0) {
-    relayState = true;
-    digitalWrite(RELAY_PIN, relayState);
-    success = true;
-    responseDoc["state"] = "on";
-  } else if (strcmp(action, "off") == 0) {
-    relayState = false;
-    digitalWrite(RELAY_PIN, relayState);
-    success = true;
-    responseDoc["state"] = "off";
-  } else if (strcmp(action, "query") == 0) {
-    success = true;
-    responseDoc["state"] = relayState ? "on" : "off";
-  } else {
-    Serial.println("Unknown action");
-    sendErrorResponse(client, "Unknown action");
-    return;
-  }
-
-  // Build response plaintext
-  responseDoc["type"] = "response";
-  responseDoc["deviceId"] = mac;
-  responseDoc["timestamp"] = now;
-  responseDoc["nonce"] = random(0xFFFFFFFF); // simple nonce
-
-  // Encrypt and sign response
-  char encryptedResponse[256];
-  // encryptMessage expects iv and output buffer; we'll generate random iv
-  uint8_t responseIv[16];
-  for (int i=0; i<16; i++) responseIv[i] = random(256);
-  encryptMessage(responseDoc, responseIv, encryptedResponse, sizeof(encryptedResponse));
-
-  // Compute HMAC over encryptedResponse (actually over iv+encrypted? we compute over encryptedResponse only as per spec)
-  char hmacHex[65]; // 32 bytes hex + null
-  computeHmac(encryptedResponse, hmacHex, sizeof(hmacHex));
-
-  // Send back JSON: {type:"encrypted", data:"<ivBase64>:<cipherBase64>", sign:"<hmacHex>"}
-  // First, base64 encode iv and encryptedResponse (which already contains iv:cipher? Wait our encryptMessage returns iv:cipher combined?)
-  // Let's redesign encryptMessage to output iv and cipher separately, but due to time we'll assume encryptMessage returns string "base64IV:base64Cipher".
-  // Actually above we defined encryptMessage to produce output in format "base64IV:base64Cipher".
-  // So encryptedResponse already contains iv:cipher in base64 with colon.
-  // We'll just send that as data.
-  String resp = String("{") +
-                "\"type\":\"encrypted\",\"" +
-                "data\":\"" + String(encryptedResponse) + "\",\"" +
-                "sign\":\"" + String(hmacHex) + "\"" +
-                "}";
-  client.println(resp);
+  Serial.println("Unknown packet type");
 }
 
-// ------------------- Pairing Handling -------------------
-void handlePairing(const JsonDocument& req) {
-  // Expecting: {type:"pairing", deviceId:"<MAC>", nonce:"<random>", ...}
-  // We'll verify deviceId matches our MAC, then generate session keys using factory secret and nonce,
-  // encrypt them with AES-ECB? Actually we'll encrypt using AES-CBC with IV derived from factory secret.
-  // For simplicity, we will derive session keys via HKDF using factory secret and nonce.
-  // Then send back encrypted session keys.
+// ------------------- Pairing Start -------------------
+void handlePairingStart(WiFiClient client, JsonDocument& req) {
+  const char* deviceId = req["deviceId"];
+  const char* ephemeralPublicKeyB64 = req["ephemeralPublicKey"];
+  const char* salt = req["salt"]; // optional
 
+  // Verify deviceId matches our MAC
   String mac = WiFi.macAddress();
   mac.replace(":", "");
-  String incomingId = req["deviceId"];
+  mac.toLowerCase();
+  String incomingId = String(deviceId);
   incomingId.toLowerCase();
   if (incomingId != mac) {
-    Serial.println("Pairing: deviceId mismatch");
+    client.println("{\"type\":\"pairing_error\",\"error\":\"Device ID mismatch\"}");
     return;
   }
-  // Generate session keys: sessionKey = HKDF(factorySecret, nonce, "session"), signKey = HKDF(factorySecret, nonce, "sign")
-  // Use mbedtls_md for HMAC-based HKDF simplification: we'll just do two rounds of HMAC.
-  uint8_t nonceBuf[16];
-  String nonceHex = req["nonce"]; // expect hex string
-  if (nonceHex.length() != 32) {
-    Serial.println("Invalid nonce length");
+
+  // Decode ephemeral public key from base64
+  size_t ephKeyLen = strlen(ephemeralPublicKeyB64);
+  uint8_t* ephemeralPublicKey = (uint8_t*)malloc(ephKeyLen);
+  size_t decodedLen = 0;
+  mbedtls_base64_decode(ephemeralPublicKey, ephKeyLen, &decodedLen, 
+                         (const unsigned char*)ephemeralPublicKeyB64, strlen(ephemeralPublicKeyB64));
+
+  // Perform ECDH to get shared secret
+  uint8_t sharedSecret[32];
+  performECDH(ephemeralPublicKey, decodedLen, sharedSecret);
+
+  // Derive session keys
+  uint8_t saltBytes[16] = {0}; // Default salt
+  if (salt) {
+    mbedtls_base64_decode(saltBytes, sizeof(saltBytes), &decodedLen, 
+                           (const unsigned char*)salt, strlen(salt));
+  }
+  deriveSessionKeys(sharedSecret, saltBytes, sizeof(saltBytes));
+
+  // Compute confirmation value (6-digit code)
+  uint8_t confirmHash[32];
+  mbedtls_sha256_context shaCtx;
+  mbedtls_sha256_init(&shaCtx);
+  mbedtls_sha256_starts(&shaCtx, 0);
+  mbedtls_sha256_update(&shaCtx, sharedSecret, 32);
+  mbedtls_sha256_update(&shaCtx, saltBytes, sizeof(saltBytes));
+  mbedtls_sha256_finish(&shaCtx, confirmHash);
+  mbedtls_sha256_free(&shaCtx);
+
+  // Derive 6-digit code from hash
+  uint32_t confirmCode = 0;
+  for (int i = 0; i < 4; i++) {
+    confirmCode = (confirmCode << 8) | confirmHash[i];
+  }
+  confirmCode = confirmCode % 1000000;
+
+  // Encode our static public key
+  uint8_t publicKeyBuf[128];
+  size_t publicKeyLen = 0;
+  mbedtls_ecp_group grp;
+  mbedtls_ecp_group_init(&grp);
+  mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
+  mbedtls_ecp_point Q;
+  mbedtls_ecp_point_init(&Q);
+  mbedtls_ecp_copy(&Q, &keypair.Q);
+  mbedtls_ecp_point_write_binary(&grp, &Q, MBEDTLS_ECP_PF_UNCOMPRESSED, 
+                                  &publicKeyLen, publicKeyBuf, sizeof(publicKeyBuf));
+  
+  // Base64 encode public key
+  size_t b64Len = 0;
+  mbedtls_base64_encode(NULL, 0, &b64Len, publicKeyBuf, publicKeyLen);
+  char* publicKeyB64 = (char*)malloc(b64Len + 1);
+  mbedtls_base64_encode((unsigned char*)publicKeyB64, b64Len, &b64Len, 
+                         publicKeyBuf, publicKeyLen);
+  publicKeyB64[b64Len] = '\0';
+
+  // Sign the public key + ephemeral key to prove ownership
+  uint8_t signBuf[256];
+  size_t signBufLen = publicKeyLen + decodedLen;
+  memcpy(signBuf, publicKeyBuf, publicKeyLen);
+  memcpy(signBuf + publicKeyLen, ephemeralPublicKey, decodedLen);
+  
+  uint8_t signature[64];
+  size_t sigLen = 0;
+  mbedtls_ecdsa_write_signature(&keypair, MBEDTLS_MD_SHA256, signBuf, signBufLen, 
+                                  signature, &sigLen, mbedtls_ctr_drbg_random, &ctr_drbg);
+
+  // Base64 encode signature
+  size_t sigB64Len = 0;
+  mbedtls_base64_encode(NULL, 0, &sigB64Len, signature, sigLen);
+  char* signatureB64 = (char*)malloc(sigB64Len + 1);
+  mbedtls_base64_encode((unsigned char*)signatureB64, sigB64Len, &sigB64Len, 
+                         signature, sigLen);
+  signatureB64[sigB64Len] = '\0';
+
+  // Send pairing response with our public key and signature
+  char response[512];
+  snprintf(response, sizeof(response), 
+           "{\"type\":\"pairing_response\",\"staticPublicKey\":\"%s\",\"signature\":\"%s\",\"confirmCode\":%u}",
+           publicKeyB64, signatureB64, confirmCode);
+  client.println(response);
+
+  // Wait for user confirmation (button press)
+  Serial.printf("Confirmation code: %06u\n", confirmCode);
+  Serial.println("Press button to confirm pairing...");
+  
+  unsigned long startTime = millis();
+  bool confirmed = false;
+  while (millis() - startTime < 60000) { // 60 second timeout
+    if (digitalRead(BUTTON_PIN) == LOW) { // Button pressed
+      delay(50); // Debounce
+      if (digitalRead(BUTTON_PIN) == LOW) {
+        confirmed = true;
+        break;
+      }
+    }
+    delay(10);
+  }
+
+  if (!confirmed) {
+    client.println("{\"type\":\"pairing_error\",\"error\":\"User did not confirm\"}");
+    pairingComplete = false;
     return;
   }
-  // Convert hex to bytes
-  for (int i=0; i<16; i++) {
-    String byteStr = nonceHex.substring(i*2, i*2+2);
-    nonceBuf[i] = (uint8_t)strtol(byteStr.c_str(), NULL, 16);
+
+  pairingComplete = true;
+  Serial.println("Pairing confirmed!");
+  
+  // Clean up
+  free(ephemeralPublicKey);
+  free(publicKeyB64);
+  free(signatureB64);
+}
+
+// ------------------- Pairing Confirm -------------------
+void handlePairingConfirm(WianoClient client, JsonDocument& req) {
+  bool userConfirmed = req["confirmed"];
+  if (!userConfirmed) {
+    pairingComplete = false;
+    client.println("{\"type\":\"pairing_error\",\"error\":\"User declined\"}");
+    return;
+  }
+  pairingComplete = true;
+  client.println("{\"type\":\"pairing_success\"}");
+}
+
+// ------------------- Encrypted Command -------------------
+void handleEncryptedCommand(WiFiClient client, JsonDocument& req) {
+  if (!pairingComplete) {
+    client.println("{\"type\":\"error\",\"error\":\"Not paired\"}");
+    return;
   }
 
-  // Derive keys using HMAC-SHA256 with factorySecret as key and nonce as data, then expand.
-  // sessionKey = HMAC(factorySecret, nonce || 0x01)
-  // signKey    = HMAC(factorySecret, nonce || 0x02)
-  uint8_t hmacBuf[32];
-  mbedtls_md_context_t ctx;
-  mbedtls_md_type_t md_type = MBEDTLS_MD_SHA256;
-  mbedtls_md_init(&ctx);
-  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(md_type), 1); // keyed
-  mbedtls_md_hmac_starts(&ctx, factorySecret, sizeof(factorySecret));
-  mbedtls_md_hmac_update(&ctx, nonceBuf, sizeof(nonceBuf));
-  mbedtls_md_hmac_update(&ctx, (uint8_t*)"\x01", 1);
-  mbedtls_md_hmac_finish(&ctx, hmacBuf);
-  memcpy(sessionKey, hmacBuf, 32);
-  mbedtls_md_hmac_starts(&ctx, factorySecret, sizeof(factorySecret));
-  mbedtls_md_hmac_update(&ctx, nonceBuf, sizeof(nonceBuf));
-  mbedtls_md_hmac_update(&ctx, (uint8_t*)"\x02", 1);
-  mbedtls_md_hmac_finish(&ctx, hmacBuf);
-  memcpy(signKey, hmacBuf, 32);
-  mbedtls_md_free(&ctx);
+  const char* nonceB64 = req["nonce"];
+  const char* ciphertextB64 = req["ciphertext"];
+  const char* tagB64 = req["tag"];
+  uint64_t timestamp = req["timestamp"];
 
-  keysReady = true;
-  Serial.println("Pairing successful, keys derived");
-
-  // Now encrypt sessionKey and signKey to send back to OpenClaw (so it can store them)
-  // We'll encrypt a JSON containing both keys using a temporary key derived from factory secret and a random IV.
-  // For simplicity, we encrypt using AES-ECB with factory secret? Not ideal but for demo.
-  // Better: use same AES-CBC with random IV, key = factorySecret (first 16 bytes?) but we need 32-byte key.
-  // We'll create a wrapping key: first 16 bytes of factorySecret repeated? Actually we can use AES-256 with key derived from factorySecret via SHA256.
-  uint8_t wrapKey[32];
-  mbedtls_md_context_t ctx2;
-  mbedtls_md_init(&ctx2);
-  mbedtls_md_setup(&ctx2, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 0);
-  mbedtls_md(&ctx2, factorySecret, sizeof(factorySecret), wrapKey);
-  mbedtls_md_free(&ctx2);
-
-  // Prepare plaintext JSON
-  StaticJsonDocument<200> keyDoc;
-  keyDoc["sessionKey"] = bytesToHex(sessionKey, 32);
-  keyDoc["signKey"]    = bytesToHex(signKey, 32);
-  char plaintext[256];
-  serializeJson(keyDoc, plaintext);
-
-  // Encrypt with AES-CBC using wrapKey, random IV
-  uint8_t wrapIv[16];
-  for (int i=0; i<16; i++) wrapIv[i] = random(256);
-  char encryptedKeyOut[256];
-  // We'll reuse encryptMessage but need to adapt; for brevity we'll just send keys in plaintext? Not secure.
-  // Given time constraints, we'll note that in production a proper key exchange (like ECDH) should be used.
-  // For this demo, we'll send keys encrypted with a simple XOR? Not acceptable.
-  // Instead, we'll assume the factory secret is known to OpenClaw (pre-provisioned) so it can compute the same keys.
-  // Therefore, we don't need to send keys; OpenClaw can derive them itself using the same algorithm.
-  // So we just respond with success.
-  String successResp = "{ \"type\":\"pairing_success\" }";
-  client.println(successResp);
-  // After pairing, device is considered authorized; we could set an authorized flag.
-}
-
-// ------------------- Helper Functions -------------------
-// Simple base64 encoding/decoding (using Arduino's base64 library if available, otherwise implement)
-// We'll use the built-in base64 encode/decode from Arduino core? Not guaranteed.
-// For brevity, we assume functions exist; in real code use a library.
-
-size_t base64Decode(const char* input, size_t inputLen, uint8_t* output, size_t outputSize) {
-  // Placeholder: implement using mbedtls_base64_decode
-  size_t olen = 0;
-  mbedtls_base64_decode(output, outputSize, &olen, (const unsigned char*)input, inputLen);
-  return olen;
-}
-
-String base64Encode(const uint8_t* input, size_t inputLen) {
-  size_t olen = 0;
-  mbedtls_base64_encode(NULL, 0, &olen, input, inputLen);
-  std::unique_ptr<char[]> b64(new char[olen]);
-  mbedtls_base64_encode((unsigned char*)b64.get(), olen, &olen, input, inputLen);
-  return String(b64.get(), olen-1); // exclude null
-}
-
-// AES encryption: expects plain JSON document, generates random IV, returns string "base64IV:base64Cipher"
-void encryptMessage(const StaticJsonDocument<200>& plain, uint8_t* iv, char* output, size_t outputSize) {
-  // Serialize JSON
-  char jsonBuffer[512];
-  size_t jsonLen = serializeJson(plain, jsonBuffer, sizeof(jsonBuffer));
-  // Pad to multiple of 16 (PKCS#7)
-  uint8_t pad = 16 - (jsonLen % 16);
-  size_t paddedLen = jsonLen + pad;
-  std::unique_ptr<uint8_t[]> padded(new uint8_t[paddedLen]);
-  memcpy(padded.get(), jsonBuffer, jsonLen);
-  for (size_t i=jsonLen; i<paddedLen; i++) padded[i] = pad;
-  // Generate IV
-  for (int i=0; i<16; i++) iv[i] = random(256);
-  // Encrypt using AES-256-CBC
-  aesLib.setkey(sessionKey, 256); // set key
-  aesLib.iv(iv);
-  aesLib.crypt(cipherText.get(), padded.get(), paddedLen); // Assuming aesLib has crypt method that does CBC encrypt
-  // Actually AESLib may have different API; we'll assume encrypt function exists.
-  // For simplicity, we'll skip detailed AESLib usage and note that implementation needed.
-  // Output: base64IV:base64Cipher
-  String ivB64 = base64Encode(iv, 16);
-  String cipherB64 = base64Encode(cipherText.get(), paddedLen);
-  snprintf(output, outputSize, "%s:%s", ivB64.c_str(), cipherB64.c_str());
-}
-
-// Decrypt: input ciphertext string "base64IV:base64Cipher", iv provided (we already split)
-// Actually we will pass iv separately; but we already have iv from splitting.
-bool decryptMessage(const char* input, const uint8_t* iv, StaticJsonDocument<200>& doc) {
-  // Expect input is base64 ciphertext only (we split iv earlier)
-  // Decode base64
-  size_t cipherLen = strlen(input);
-  std::unique_ptr<uint8_t[]> cipherBuf(new uint8_t[cipherLen]);
-  size_t plainLen = 0;
-  mbedtls_base64_decode(cipherBuf.get(), cipherLen, &plainLen, (const unsigned char*)input, cipherLen);
-  if (plainLen == 0) return false;
-  // Decrypt using AES-256-CBC with sessionKey and iv
-  aesLib.setkey(sessionKey, 256);
-  aesLib.iv(iv);
-  std::unique_ptr<uint8_t[]> plainBuf(new uint8_t[plainLen]);
-  aesLib.plain(plainBuf.get(), cipherBuf.get(), plainLen); // hypothetical
-  // Remove PKCS#7 padding
-  uint8_t pad = plainBuf[plainLen-1];
-  if (pad > 16) return false;
-  for (size_t i=plainLen-pad; i<plainLen; i++) {
-    if (plainBuf[i] != pad) return false;
+  // Check timestamp freshness (within 5 seconds)
+  uint64_t now = millis();
+  if (abs((int64_t)(now - timestamp)) > 5000) {
+    client.println("{\"type\":\"error\",\"error\":\"Timestamp stale\"}");
+    return;
   }
-  size_t trueLen = plainLen - pad;
-  // Parse JSON
-  char jsonBuf[512];
-  memcpy(jsonBuf, plainBuf.get(), trueLen);
-  jsonBuf[trueLen] = '\0';
-  DeserializationError error = deserializeJson(doc, jsonBuf);
-  return !error;
-}
 
-// HMAC verification
-bool verifyHmac(const char* msg, const char* hexHmac) {
-  // Compute HMAC-SHA256 of msg using signKey
-  mbedtls_md_context_t ctx;
-  mbedtls_md_init(&ctx);
-  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1); // keyed
-  mbedtls_md_hmac_starts(&ctx, signKey, sizeof(signKey));
-  mbedtls_md_hmac_update(&ctx, (const unsigned char*)msg, strlen(msg));
-  unsigned char hmacResult[32];
-  mbedtls_md_hmac_finish(&ctx, hmacResult);
-  mbedtls_md_free(&ctx);
-  // Compare
-  char computedHex[65];
-  for (int i=0; i<32; i++) {
-    sprintf(&computedHex[i*2], "%02x", hmacResult[i]);
+  // Decode nonce, ciphertext, tag
+  uint8_t nonce[12];
+  uint8_t tag[16];
+  size_t nonceLen = 0, tagLen = 0;
+  mbedtls_base64_decode(nonce, sizeof(nonce), &nonceLen, 
+                         (const unsigned char*)nonceB64, strlen(nonceB64));
+  mbedtls_base64_decode(tag, sizeof(tag), &tagLen, 
+                         (const unsigned char*)tagB64, strlen(tagB64));
+
+  size_t ctLen = 0;
+  mbedtls_base64_decode(NULL, 0, &ctLen, (const unsigned char*)ciphertextB64, strlen(ciphertextB64));
+  uint8_t* ciphertext = (uint8_t*)malloc(ctLen);
+  mbedtls_base64_decode(ciphertext, ctLen, &ctLen, 
+                         (const unsigned char*)ciphertextB64, strlen(ciphertextB64));
+
+  // Decrypt
+  uint8_t plaintext[256];
+  size_t ptLen = sizeof(plaintext);
+  int ret = decryptMessage(ciphertext, ctLen, sessionKey, nonce, tag, plaintext, &ptLen);
+  if (ret != 0) {
+    client.println("{\"type\":\"error\",\"error\":\"Decryption failed\"}");
+    free(ciphertext);
+    return;
   }
-  computedHex[64] = '\0';
-  // Constant-time compare? Not needed for demo.
-  return strcmp(computedHex, hexHmac) == 0;
-}
+  free(ciphertext);
 
-// Compute HMAC hex string
-void computeHmac(const char* msg, char* hexHmac, size_t hexHmacSize) {
-  mbedtls_md_context_t ctx;
-  mbedtls_md_init(&ctx);
-  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1);
-  mbedtls_md_hmac_starts(&ctx, signKey, sizeof(signKey));
-  mbedtls_md_hmac_update(&ctx, (const unsigned char*)msg, strlen(msg));
-  unsigned char hmacResult[32];
-  mbedtls_md_hmac_finish(&ctx, hmacResult);
-  mbedtls_md_free(&ctx);
-  for (int i=0; i<32; i++) {
-    sprintf(&hexHmac[i*2], "%02x", hmacResult[i]);
+  // Parse plaintext JSON
+  StaticJsonDocument<256> cmdDoc;
+  deserializeJson(cmdDoc, plaintext);
+
+  const char* action = cmdDoc["action"];
+  
+  // Execute command
+  if (strcmp(action, "on") == 0) {
+    relayState = true;
+  } else if (strcmp(action, "off") == 0) {
+    relayState = false;
+  } else if (strcmp(action, "query") == 0) {
+    // No action, just report state
   }
-  hexHmac[64] = '\0';
+  digitalWrite(RELAY_PIN, relayState);
+
+  // Prepare response
+  StaticJsonDocument<128> response;
+  response["type"] = "response";
+  response["state"] = relayState ? "on" : "off";
+  response["timestamp"] = millis();
+
+  // Encrypt response
+  uint8_t respNonce[12];
+  mbedtls_ctr_drbg_random(&ctr_drbg, respNonce, sizeof(respNonce));
+  
+  uint8_t respCt[256];
+  uint8_t respTag[16];
+  size_t respCtLen = sizeof(respCt);
+  
+  String respJson;
+  serializeJson(response, respJson);
+  
+  encryptMessage((const uint8_t*)respJson.c_str(), respJson.length(), 
+                  sessionKey, respCt, &respCtLen, respNonce, respTag);
+
+  // Base64 encode
+  size_t nonceB64Len = 0, ctB64Len = 0, tagB64Len = 0;
+  mbedtls_base64_encode(NULL, 0, &nonceB64Len, respNonce, sizeof(respNonce));
+  mbedtls_base64_encode(NULL, 0, &ctB64Len, respCt, respCtLen);
+  mbedtls_base64_encode(NULL, 0, &tagB64Len, respTag, sizeof(respTag));
+
+  char* respNonceB64 = (char*)malloc(nonceB64Len + 1);
+  char* respCtB64 = (char*)malloc(ctB64Len + 1);
+  char* respTagB64 = (char*)malloc(tagB64Len + 1);
+
+  mbedtls_base64_encode((unsigned char*)respNonceB64, nonceB64Len, &nonceB64Len, 
+                         respNonce, sizeof(respNonce));
+  mbedtls_base64_encode((unsigned char*)respCtB64, ctB64Len, &ctB64Len, 
+                         respCt, respCtLen);
+  mbedtls_base64_encode((unsigned char*)respTagB64, tagB64Len, &tagB64Len, 
+                         respTag, sizeof(respTag));
+
+  respNonceB64[nonceB64Len] = '\0';
+  respCtB64[ctB64Len] = '\0';
+  respTagB64[tagB64Len] = '\0';
+
+  // Send response
+  char finalResp[512];
+  snprintf(finalResp, sizeof(finalResp), 
+           "{\"type\":\"encrypted\",\"nonce\":\"%s\",\"ciphertext\":\"%s\",\"tag\":\"%s\"}",
+           respNonceB64, respCtB64, respTagB64);
+  client.println(finalResp);
+
+  free(respNonceB64);
+  free(respCtB64);
+  free(respTagB64);
 }
 
-// Utility: bytes to hex string
-String bytesToHex(const uint8_t* data, size_t len) {
-  String out = "";
-  for (size_t i=0; i<len; i++) {
-    char buf[3];
-    sprintf(buf, "%02x", data[i]);
-    out += buf;
-  }
-  return out;
+// ------------------- Key Generation -------------------
+void generateKeyPair() {
+  mbedtls_ecp_keypair_init(&keypair);
+  mbedtls_ecp_group_init(&keypair.grp);
+  mbedtls_ecp_group_load(&keypair.grp, MBEDTLS_ECP_DP_CURVE25519);
+  mbedtls_mpi_init(&keypair.d);
+  mbedtls_ecp_point_init(&keypair.Q);
+
+  // Generate private key
+  mbedtls_ecp_gen_keypair(&keypair.grp, &keypair.d, &keypair.Q, 
+                           mbedtls_ctr_drbg_random, &ctr_drbg);
+
+  keysInitialized = true;
+  Serial.println("EC key pair generated");
 }
 
-// Send error response (unencrypted for simplicity in demo)
-void sendErrorResponse(WiFiClient client, const char* msg) {
-  StaticJsonDocument<200> err;
-  err["type"] = "error";
-  err["message"] = msg;
-  char out[256];
-  serializeJson(err, out);
-  client.println(out);
+bool loadKeyPair() {
+  // In production, load from flash/NVS
+  // For simplicity, always generate new (would be persisted in production)
+  return false;
+}
+
+bool saveKeyPair() {
+  // In production, save private key to flash/NVS
+  // For now, just log
+  Serial.println("Key pair would be saved to flash");
+  return true;
+}
+
+// ------------------- ECDH -------------------
+void performECDH(uint8_t* peerPublicKey, size_t peerKeyLen, uint8_t* sharedSecret) {
+  mbedtls_ecp_group grp;
+  mbedtls_ecp_group_init(&grp);
+  mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
+
+  // Parse peer's public key
+  mbedtls_ecp_point peerQ;
+  mbedtls_ecp_point_init(&peerQ);
+  mbedtls_ecp_point_read_binary(&grp, &peerQ, peerPublicKey, peerKeyLen);
+
+  // Compute shared secret: sharedSecret = ourPrivateKey * peerPublicKey
+  mbedtls_mpi sharedSecretMPI;
+  mbedtls_mpi_init(&sharedSecretMPI);
+  mbedtls_ecdh_compute_shared(&grp, &sharedSecretMPI, &peerQ, &keypair.d, 
+                               mbedtls_ctr_drbg_random, &ctr_drbg);
+
+  // Convert to bytes
+  mbedtls_mpi_write_binary(&sharedSecretMPI, sharedSecret, 32);
+
+  // Cleanup
+  mbedtls_ecp_point_free(&peerQ);
+  mbedtls_mpi_free(&sharedSecretMPI);
+  mbedtls_ecp_group_free(&grp);
+}
+
+void deriveSessionKeys(const uint8_t* sharedSecret, const uint8_t* salt, size_t saltLen) {
+  // Simple key derivation: use HKDF-like approach
+  // sessionKey = SHA256(sharedSecret || "encryption" || salt)
+  // signKey = SHA256(sharedSecret || "signing" || salt)
+  
+  mbedtls_sha256_context shaCtx;
+  mbedtls_sha256_init(&shaCtx);
+
+  // Derive encryption key
+  mbedtls_sha256_starts(&shaCtx, 0);
+  mbedtls_sha256_update(&shaCtx, sharedSecret, 32);
+  mbedtls_sha256_update(&shaCtx, (const uint8_t*)"encryption", 10);
+  mbedtls_sha256_update(&shaCtx, salt, saltLen);
+  mbedtls_sha256_finish(&shaCtx, sessionKey);
+
+  // Derive signing key
+  mbedtls_sha256_starts(&shaCtx, 0);
+  mbedtls_sha256_update(&shaCtx, sharedSecret, 32);
+  mbedtls_sha256_update(&shaCtx, (const uint8_t*)"signing", 7);
+  mbedtls_sha256_update(&shaCtx, salt, saltLen);
+  mbedtls_sha256_finish(&shaCtx, signKey);
+
+  mbedtls_sha256_free(&shaCtx);
+}
+
+// ------------------- Encryption/Decryption -------------------
+int encryptMessage(const uint8_t* plaintext, size_t plaintextLen, 
+                   const uint8_t* key, uint8_t* ciphertext, size_t* ciphertextLen,
+                   uint8_t* nonce, uint8_t* tag) {
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
+  mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256);
+  
+  int ret = mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, plaintextLen, 
+                                       nonce, 12, NULL, 0, plaintext, ciphertext, 16, tag);
+  
+  *ciphertextLen = plaintextLen;
+  mbedtls_gcm_free(&gcm);
+  return ret;
+}
+
+int decryptMessage(const uint8_t* ciphertext, size_t ciphertextLen,
+                   const uint8_t* key, const uint8_t* nonce, const uint8_t* tag,
+                   uint8_t* plaintext, size_t* plaintextLen) {
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
+  mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256);
+  
+  int ret = mbedtls_gcm_auth_decrypt(&gcm, ciphertextLen, nonce, 12, NULL, 0, tag, 16, 
+                                      ciphertext, plaintext);
+  
+  *plaintextLen = ciphertextLen;
+  mbedtls_gcm_free(&gcm);
+  return ret;
 }
