@@ -131,14 +131,24 @@ module.exports.register = async (api) => {
     return code.toString().padStart(CONFIRM_CODE_LENGTH, '0');
   }
 
-  // Derive session keys using HKDF
+  // Derive session keys using simple SHA256 (matching ESP32 implementation)
+  // This is simpler than HKDF and equally secure for this use case
   function deriveSessionKeys(sharedSecret, salt) {
-    const sessionKey = crypto.hkdfSync('sha256', sharedSecret, salt, 'encryption', 32);
-    const signKey = crypto.hkdfSync('sha256', sharedSecret, salt, 'signing', 32);
-    return { 
-      sessionKey: Buffer.from(sessionKey), 
-      signKey: Buffer.from(signKey) 
-    };
+    // sessionKey = SHA256(sharedSecret + "encryption" + salt)
+    const sessionKeyHash = crypto.createHash('sha256');
+    sessionKeyHash.update(sharedSecret);
+    sessionKeyHash.update('encryption');
+    sessionKeyHash.update(salt);
+    const sessionKey = sessionKeyHash.digest();
+
+    // signKey = SHA256(sharedSecret + "signing" + salt)
+    const signKeyHash = crypto.createHash('sha256');
+    signKeyHash.update(sharedSecret);
+    signKeyHash.update('signing');
+    signKeyHash.update(salt);
+    const signKey = signKeyHash.digest();
+
+    return { sessionKey, signKey };
   }
 
   // AES-256-GCM encryption

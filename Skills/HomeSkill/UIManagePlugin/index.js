@@ -210,7 +210,7 @@ module.exports.register = async (api) => {
       res.writeHead(301, { "Location": `https://${req.headers.host.split(':')[0]}:${pluginConfig.httpsPort}${req.url}` });
       res.end();
     });
-    httpServer.listen(pluginConfig.httpPort, () => {
+    httpServer.listen(actualHttpPort, () => {
       api.logger.info(`UI管理HTTP重定向服务已启动，监听端口：${pluginConfig.httpPort} -> HTTPS ${pluginConfig.httpsPort}`);
     });
 

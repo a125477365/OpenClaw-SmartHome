@@ -31,6 +31,8 @@
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/gcm.h>
 #include <mbedtls/sha256.h>
+#include <mbedtls/base64.h>
+#include <mbedtls/md.h>
 
 // ------------------- Configuration -------------------
 const char* WIFI_SSID = "";        // To be set via SmartConfig
@@ -327,7 +329,7 @@ void handlePairingStart(WiFiClient client, JsonDocument& req) {
 }
 
 // ------------------- Pairing Confirm -------------------
-void handlePairingConfirm(WianoClient client, JsonDocument& req) {
+void handlePairingConfirm(WiFiClient client, JsonDocument& req) {
   bool userConfirmed = req["confirmed"];
   if (!userConfirmed) {
     pairingComplete = false;
