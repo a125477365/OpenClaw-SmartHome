@@ -248,23 +248,17 @@ void handleRoot() {
                 justify-content: center; margin-right: 12px; font-weight: bold; }
     .form-group { margin-bottom: 16px; }
     label { display: block; margin-bottom: 8px; color: #555; font-weight: 500; }
-    select, input[type="text"], input[type="password"], input[type="number"] { 
+    input[type="text"], input[type="password"], input[type="number"] { 
       width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; 
       font-size: 16px; transition: border-color 0.3s; }
-    select:focus, input:focus { border-color: #667eea; outline: none; }
-    .wifi-list { max-height: 200px; overflow-y: auto; border: 2px solid #e0e0e0; 
-                 border-radius: 8px; margin-bottom: 16px; }
-    .wifi-item { padding: 12px 16px; border-bottom: 1px solid #eee; cursor: pointer; 
-                 display: flex; justify-content: space-between; align-items: center; }
-    .wifi-item:hover { background: #f5f5f5; }
-    .wifi-item.selected { background: #e8f5e9; }
-    .wifi-name { font-weight: 500; }
-    .wifi-rssi { color: #888; font-size: 14px; }
+    input:focus { border-color: #667eea; outline: none; }
     button { width: 100%; padding: 14px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
              color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; 
              cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; }
     button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(102,126,234,0.4); }
     button:disabled { background: #ccc; cursor: not-allowed; transform: none; box-shadow: none; }
+    button.secondary { background: #f5f5f5; color: #333; margin-top: 10px; }
+    button.secondary:hover { background: #e0e0e0; }
     .loading { text-align: center; padding: 20px; }
     .spinner { width: 40px; height: 40px; border: 4px solid #f3f3f3; border-top: 4px solid #667eea; 
                border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 16px; }
@@ -275,8 +269,21 @@ void handleRoot() {
                     color: #667eea; text-align: center; margin: 20px 0; font-family: monospace; }
     .info-box { background: #e3f2fd; padding: 16px; border-radius: 8px; margin-top: 16px; }
     .info-box p { color: #1565c0; margin: 8px 0; }
+    .warning-box { background: #fff3e0; padding: 16px; border-radius: 8px; margin-top: 16px; border-left: 4px solid #ff9800; }
+    .warning-box p { color: #e65100; margin: 8px 0; font-size: 14px; }
+    .wifi-list { max-height: 200px; overflow-y: auto; border: 2px solid #e0e0e0; 
+                 border-radius: 8px; margin-bottom: 16px; }
+    .wifi-item { padding: 12px 16px; border-bottom: 1px solid #eee; cursor: pointer; 
+                 display: flex; justify-content: space-between; align-items: center; }
+    .wifi-item:hover { background: #f5f5f5; }
+    .wifi-name { font-weight: 500; }
+    .wifi-rssi { color: #888; font-size: 14px; }
     #step2, #step3, #status { display: none; }
     .hidden { display: none !important; }
+    .tabs { display: flex; margin-bottom: 20px; border-radius: 8px; overflow: hidden; }
+    .tab { flex: 1; padding: 12px; text-align: center; background: #f5f5f5; cursor: pointer; transition: all 0.3s; }
+    .tab.active { background: #667eea; color: white; }
+    .tab:not(.active):hover { background: #e0e0e0; }
   </style>
 </head>
 <body>
@@ -285,14 +292,43 @@ void handleRoot() {
       <h1>🔌 OpenClaw 智能开关</h1>
       <p class="subtitle" id="deviceName">设备: Loading...</p>
       
+      <!-- Step 1: WiFi Input -->
       <div id="step1">
-        <div class="step"><div class="step-num">1</div><h2>选择 WiFi 网络</h2></div>
-        <div class="wifi-list" id="wifiList">
-          <div class="loading"><div class="spinner"></div><p>正在扫描 WiFi...</p></div>
+        <div class="step"><div class="step-num">1</div><h2>输入 WiFi 信息</h2></div>
+        
+        <div class="warning-box">
+          <p><strong>📱 iOS 用户注意：</strong></p>
+          <p>如果需要查看可用 WiFi 列表，请：</p>
+          <p>1. 点击下方"扫描 WiFi"按钮</p>
+          <p>2. 前往系统设置 → WiFi</p>
+          <p>3. 等待扫描完成后返回此页面刷新列表</p>
         </div>
-        <button onclick="scanWiFi()">🔄 刷新列表</button>
+        
+        <!-- Tabs for Input Method -->
+        <div class="tabs">
+          <div class="tab active" onclick="showManualInput()">手动输入</div>
+          <div class="tab" onclick="showWifiList()">扫描列表</div>
+        </div>
+        
+        <!-- Manual Input -->
+        <div id="manualInput">
+          <div class="form-group">
+            <label for="wifiSSID">WiFi 名称 (SSID)</label>
+            <input type="text" id="wifiSSID" placeholder="请输入 WiFi 名称">
+          </div>
+          <button onclick="showStep2()" style="margin-top:10px;">下一步</button>
+        </div>
+        
+        <!-- WiFi List (for Android/Desktop) -->
+        <div id="wifiListContainer" style="display:none;">
+          <div class="wifi-list" id="wifiList">
+            <div class="loading"><div class="spinner"></div><p>正在扫描 WiFi...</p></div>
+          </div>
+          <button class="secondary" onclick="scanWiFi()">🔄 刷新列表</button>
+        </div>
       </div>
       
+      <!-- Step 2: WiFi Password -->
       <div id="step2">
         <div class="step"><div class="step-num">2</div><h2>输入 WiFi 密码</h2></div>
         <p id="selectedWifi" style="margin-bottom:16px;color:#666;"></p>
@@ -303,6 +339,7 @@ void handleRoot() {
         <button onclick="showStep3()">下一步</button>
       </div>
       
+      <!-- Step 3: OpenClaw Server -->
       <div id="step3">
         <div class="step"><div class="step-num">3</div><h2>输入 OpenClaw 服务器地址</h2></div>
         <div class="form-group">
@@ -316,6 +353,7 @@ void handleRoot() {
         <button onclick="startConnect()">连接并配对</button>
       </div>
       
+      <!-- Status -->
       <div id="status">
         <div id="connectingStatus">
           <div class="loading">
@@ -353,6 +391,21 @@ void handleRoot() {
     const deviceName = ')"+deviceName+R"(';
     document.getElementById('deviceName').textContent = '设备: ' + deviceName;
     
+    function showManualInput() {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelector('.tab:first-child').classList.add('active');
+      document.getElementById('manualInput').style.display = 'block';
+      document.getElementById('wifiListContainer').style.display = 'none';
+    }
+    
+    function showWifiList() {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelector('.tab:last-child').classList.add('active');
+      document.getElementById('manualInput').style.display = 'none';
+      document.getElementById('wifiListContainer').style.display = 'block';
+      scanWiFi();
+    }
+    
     function scanWiFi() {
       document.getElementById('wifiList').innerHTML = '<div class="loading"><div class="spinner"></div><p>正在扫描 WiFi...</p></div>';
       fetch('/scan')
@@ -389,6 +442,18 @@ void handleRoot() {
       document.querySelectorAll('.wifi-item').forEach(e => e.classList.remove('selected'));
       el.classList.add('selected');
       document.getElementById('selectedWifi').textContent = '已选择: ' + ssid;
+      document.getElementById('step1').style.display = 'none';
+      document.getElementById('step2').style.display = 'block';
+    }
+    
+    function showStep2() {
+      const ssid = document.getElementById('wifiSSID').value.trim();
+      if (!ssid) {
+        alert('请输入 WiFi 名称');
+        return;
+      }
+      selectedSSID = ssid;
+      document.getElementById('selectedWifi').textContent = 'WiFi: ' + ssid;
       document.getElementById('step1').style.display = 'none';
       document.getElementById('step2').style.display = 'block';
     }
@@ -485,11 +550,7 @@ void handleRoot() {
       document.getElementById('connectingStatus').classList.remove('hidden');
       document.getElementById('step1').style.display = 'block';
       statusCheckCount = 0;
-      scanWiFi();
     }
-    
-    // Start scan on load
-    scanWiFi();
   </script>
 </body>
 </html>
