@@ -1,0 +1,17 @@
+G04 OpenClaw Smart Switch v3.0 - Bottom Paste*
+G04 Layer: B.Paste (Solder Paste Bottom - generally unused)*
+%FSLAX46Y46*%
+%MOMM*%
+%LPD*%
+
+G04 ========================================
+G04 Aperture Definitions
+G04 ========================================
+%ADD10C,0.50*%
+
+G04 ========================================
+G04 No bottom side SMT components
+G04 This layer is intentionally minimal
+G04 ========================================
+
+M02*

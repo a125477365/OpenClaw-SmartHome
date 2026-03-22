@@ -1,0 +1,128 @@
+G04 OpenClaw Smart Switch v3.0 - Top Silkscreen*
+G04 Layer: F.SilkS (Silkscreen Top)*
+%FSLAX46Y46*%
+%MOMM*%
+%LPD*%
+
+G04 ========================================
+G04 Aperture Definitions
+G04 ========================================
+%ADD10C,0.15*%
+
+G04 ========================================
+G04 Board Outline Reference
+G04 ========================================
+G54D10*
+G01X0Y0D02*
+X86Y0D01*
+X86Y86D01*
+X0Y86D01*
+X0Y0D01*
+
+G04 ========================================
+G04 Component Labels - Weak Electrical Area
+G04 ========================================
+
+G04 ESP32 Module Label
+G01X15Y25D02*
+X15Y45D01*
+G01X15Y35D02*
+X25Y35D01*
+
+G04 LED Label
+G01X22Y12D02*
+X28Y12D01*
+G01X25Y12D02*
+X25Y18D01*
+
+G04 Button Label (SW1 - Config)
+G01X22Y67D02*
+X28Y67D01*
+G01X25Y67D02*
+X25Y73D01*
+
+G04 Transistor Label (Q1)
+G01X33Y53D02*
+X37Y53D01*
+
+G04 Capacitor/Resistor Labels
+G01X18Y33D02*
+X22Y33D01*
+G01X30Y38D02*
+X32Y38D01*
+G01X30Y68D02*
+X32Y68D01*
+G01X33Y46D02*
+X37Y46D01*
+
+G04 ========================================
+G04 Component Labels - Strong Electrical Area
+G04 ========================================
+
+G04 Power Module Label (U2)
+G01X55Y12D02*
+X75Y12D01*
+G01X55Y12D02*
+X55Y28D01*
+
+G04 Relay Label (K1)
+G01X55Y48D02*
+X75Y48D01*
+G01X55Y48D02*
+X55Y62D01*
+
+G04 Fuse Label (F1)
+G01X62Y32D02*
+X68Y32D01*
+G01X65Y32D02*
+X65Y38D01*
+
+G04 MOV Label (RV1)
+G01X47Y16D02*
+X53Y16D01*
+
+G04 Capacitor Label (C1)
+G01X48Y26D02*
+X52Y26D01*
+
+G04 Diode Label (D2)
+G01X58Y50D02*
+X62Y50D01*
+
+G04 Terminal Block Labels
+G01X78Y18D02*
+X86Y18D01*
+G01X78Y28D02*
+X86Y28D01*
+G01X78Y53D02*
+X86Y53D01*
+G01X78Y68D02*
+X86Y68D01*
+
+G04 ========================================
+G04 Special Markings
+G04 ========================================
+
+G04 Strong-Weak Separation Line
+G01X45Y0D02*
+X45Y86D01*
+
+G04 Mounting Hole Markers
+G01X11Y9D02*
+X15Y9D01*
+G01X13Y7D02*
+X13Y11D01*
+G01X71Y9D02*
+X75Y9D01*
+G01X73Y7D02*
+X73Y11D01*
+G01X11Y75D02*
+X15Y75D01*
+G01X13Y73D02*
+X13Y77D01*
+G01X71Y75D02*
+X75Y75D01*
+G01X73Y73D02*
+X73Y77D01*
+
+M02*

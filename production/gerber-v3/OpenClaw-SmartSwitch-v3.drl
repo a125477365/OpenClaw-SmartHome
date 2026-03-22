@@ -1,0 +1,240 @@
+; OpenClaw Smart Switch v3.0 - Drill File
+; Production Ready Version
+; Date: 2026-03-22
+; Units: METRIC
+; Board Size: 86mm x 86mm
+; Mounting Holes: M3, 60mm spacing (standard 86-type)
+; Chip: ESP32-WROOM-32D
+; Relay: SRD-05VDC-SL-C (Normally Closed)
+; 
+; Strong-Weak Electrical Separation: X >= 45mm for high voltage
+
+M48
+FMAT,2
+METRIC,TZ
+
+; ========================================
+; Tool Definitions
+; ========================================
+T1C0.30   ; Via holes (signal)
+T2C0.80   ; Signal holes (resistor/capacitor leads)
+T3C1.00   ; Component leads (small)
+T4C1.50   ; Relay coil pins
+T5C2.00   ; Relay contact pins
+T6C3.20   ; Terminal block holes
+T7C4.00   ; Mounting holes (M3)
+T8C0.90   ; Electrolytic capacitor
+T9C1.20   ; Button pins
+
+%
+
+G90
+G05
+
+; ========================================
+; Mounting Holes (M3 x 4 corners)
+; Position: (13, 13), (73, 13), (13, 73), (73, 73)
+; Spacing: 60mm x 60mm (standard 86-type)
+; ========================================
+T7
+X13.00Y13.00
+X73.00Y13.00
+X13.00Y73.00
+X73.00Y73.00
+
+; ========================================
+; WEAK ELECTRICAL AREA (X < 45mm)
+; ========================================
+
+; ESP32-WROOM-32D Module (U1)
+; Position: Center at (25, 45)
+; Left side pins (GPIO side)
+T2
+X13.00Y25.00
+X13.00Y27.54
+X13.00Y30.08
+X13.00Y32.62
+X13.00Y35.16
+X13.00Y37.70
+X13.00Y40.24
+X13.00Y42.78
+X13.00Y45.32
+X13.00Y47.86
+X13.00Y50.40
+X13.00Y52.94
+X13.00Y55.48
+X13.00Y58.02
+X13.00Y60.56
+X13.00Y63.10
+X13.00Y65.64
+X13.00Y68.18
+X13.00Y70.72
+
+; Right side pins (Power/Flash side)
+X37.00Y25.00
+X37.00Y27.54
+X37.00Y30.08
+X37.00Y32.62
+X37.00Y35.16
+X37.00Y37.70
+X37.00Y40.24
+X37.00Y42.78
+X37.00Y45.32
+X37.00Y47.86
+X37.00Y50.40
+X37.00Y52.94
+X37.00Y55.48
+X37.00Y58.02
+X37.00Y60.56
+X37.00Y63.10
+X37.00Y65.64
+X37.00Y68.18
+X37.00Y70.72
+
+; WS2812B RGB LED (D1)
+; Position: (25, 15)
+; Package: 5050 SMD (no through holes)
+T1
+X22.50Y12.50
+X22.50Y17.50
+X27.50Y17.50
+X27.50Y12.50
+
+; Configuration Button (SW1)
+; Position: (25, 70)
+; Size: 6x6mm tactile switch
+T9
+X22.00Y67.00
+X22.00Y73.00
+X28.00Y67.00
+X28.00Y73.00
+
+; S8050 Transistor (Q1)
+; Position: (35, 55)
+; Package: TO-92
+T3
+X33.50Y53.50
+X35.00Y53.50
+X36.50Y53.50
+
+; Decoupling Capacitors (C2, C3)
+; Package: 0805 (no through holes, SMD)
+T1
+X20.00Y35.00
+X22.00Y35.00
+X30.00Y40.00
+X32.00Y40.00
+
+; Pull-up Resistor for Button (R2)
+; Value: 10K
+; Package: 0805 (SMD)
+T1
+X30.00Y70.00
+X32.00Y70.00
+
+; Base Resistor for Transistor (R1)
+; Value: 1K
+; Package: 0805 (SMD)
+T1
+X35.00Y48.00
+X37.00Y48.00
+
+; ========================================
+; STRONG ELECTRICAL AREA (X >= 45mm)
+; ========================================
+
+; HLK-PM01 Power Module (U2)
+; Position: (65, 20)
+; AC Input pins
+T6
+X55.00Y15.00
+X55.00Y25.00
+
+; DC Output pins
+X75.00Y15.00
+X75.00Y25.00
+
+; Electrolytic Capacitor (C1)
+; Position: (50, 30)
+; Value: 100uF/10V
+T8
+X50.00Y28.00
+X50.00Y32.00
+
+; Fuse Holder (F1)
+; Position: (65, 35)
+; Rating: 250V 1A
+T6
+X63.00Y33.00
+X67.00Y33.00
+X63.00Y37.00
+X67.00Y37.00
+
+; MOV Varistor (RV1)
+; Position: (50, 20)
+; Value: 14D471K
+T3
+X48.00Y18.00
+X52.00Y18.00
+
+; Relay SRD-05VDC-SL-C (K1)
+; Position: (65, 55)
+; Type: Normally Closed (NC)
+T4
+; Coil pins
+X55.00Y50.00
+X55.00Y60.00
+
+T5
+; Contact pins
+X75.00Y50.00  ; COM
+X75.00Y55.00  ; NC (we use this)
+X75.00Y60.00  ; NO (not used)
+
+; Freewheeling Diode (D2)
+; Position: (60, 55)
+; Value: 1N4007
+T3
+X60.00Y52.00
+X60.00Y58.00
+
+; Terminal Blocks
+; J1: L/N Input (AC 220V)
+; J2: COM Output (to lamp)
+; J3: SW Input (from manual switch)
+; Position: Right edge
+T6
+; L Input
+X80.00Y20.00
+X85.00Y20.00
+; N Input
+X80.00Y30.00
+X85.00Y30.00
+; COM Output
+X80.00Y55.00
+X85.00Y55.00
+; SW Input
+X80.00Y70.00
+X85.00Y70.00
+
+; ========================================
+; Via Holes (Signal + Ground stitching)
+; ========================================
+T1
+; Weak electrical area vias
+X15.00Y30.00
+X15.00Y50.00
+X15.00Y70.00
+X25.00Y40.00
+X25.00Y60.00
+X35.00Y50.00
+
+; Strong electrical area vias
+X50.00Y25.00
+X50.00Y40.00
+X65.00Y25.00
+X65.00Y45.00
+X75.00Y25.00
+X75.00Y45.00
+
+M30
