@@ -1,0 +1,41 @@
+[Design]
+Version=1
+HierarchyMode=0
+ChannelDescriptorName=0
+
+[Document1]
+DocumentPath=OpenClaw-SmartSwitch.SchDoc
+AnnotationEnabled=1
+AnnotateScope=-1
+AnnotationIndex=0
+AnnotationDelimiter=
+AnnotationSuffix=
+UniqueIDPath=
+
+[Document2]
+DocumentPath=OpenClaw-SmartSwitch.PcbDoc
+AnnotationEnabled=1
+AnnotateScope=-1
+AnnotationIndex=0
+AnnotationDelimiter=
+AnnotationSuffix=
+UniqueIDPath=
+
+[Configuration1]
+Name=Sources[Configuration]
+Count=0
+
+[OutputGroup1]
+Name=Netlist Outputs
+Enabled=1
+ConfigurationType=1
+
+[OutputGroup2]
+Name=Gerber Outputs
+Enabled=1
+ConfigurationType=2
+
+[OutputGroup3]
+Name=BOM Outputs
+Enabled=1
+ConfigurationType=3
