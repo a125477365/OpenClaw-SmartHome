@@ -1,0 +1,21 @@
+G04 OpenClaw Smart Switch v2.0 - Bottom Solder Mask*
+G04 Layer: B.Mask (No SMD on bottom, minimal mask)*
+%FSLAX46Y46*%
+%MOMM*%
+%ADD10C,0.50*%
+
+G04 No components on bottom layer
+G04 Minimal mask opening for via stitching
+
+X10.00Y10.00D10*
+X5.00Y5.00D10*
+X43.00Y10.00D10*
+X75.00Y10.00D10*
+X81.00Y5.00D10*
+X5.00Y81.00D10*
+X81.00Y81.00D10*
+X43.00Y60.00D10*
+X50.00Y70.00D10*
+X70.00Y75.00D10*
+
+M02*

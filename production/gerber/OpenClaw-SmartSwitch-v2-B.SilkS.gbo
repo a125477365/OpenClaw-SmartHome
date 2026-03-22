@@ -1,0 +1,10 @@
+G04 OpenClaw Smart Switch v2.0 - Bottom Silkscreen*
+G04 Layer: B.SilkS (Minimal silkscreen on bottom)*
+%FSLAX46Y46*%
+%MOMM*%
+%ADD10C,0.15*%
+
+G04 No silkscreen needed on bottom
+G04 Empty layer for production compatibility
+
+M02*
