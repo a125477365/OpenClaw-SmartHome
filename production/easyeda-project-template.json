@@ -1,0 +1,83 @@
+{
+  "editorVersion": "6.5.0",
+  "docType": "1",
+  "title": "OpenClaw Smart Switch",
+  "description": "86-type smart wall switch with ESP32",
+  "visible": false,
+  "createUnixTime": 1711075200,
+  "updateUnixTime": 1711075200,
+  "tags": ["ESP32", "Smart Home", "Relay", "86-type"],
+  "schematic": {
+    "head": {
+      "docType": "1",
+      "editorVersion": "6.5.0",
+      "x": 0,
+      "y": 0,
+      "hasCPE": false
+    },
+    "canvas": "TODO_canvas_data",
+    "shape": [
+      {"type": "lib", "uuid": "esp32_wroom_32", "title": "ESP32-WROOM-32D", "x": 100, "y": 100},
+      {"type": "lib", "uuid": "hlink_hlk_pm01", "title": "HLK-PM01", "x": 300, "y": 100},
+      {"type": "lib", "uuid": "relay_srd_05vdc", "title": "SRD-05VDC-SL-C", "x": 400, "y": 200},
+      {"type": "lib", "uuid": "ws2812b", "title": "WS2812B", "x": 150, "y": 250},
+      {"type": "lib", "uuid": "transistor_s8050", "title": "S8050", "x": 250, "y": 300},
+      {"type": "wire", "points": [[150,100], [300,100]], "net": "+5V"},
+      {"type": "wire", "points": [[150,200], [300,200]], "net": "GND"},
+      {"type": "wire", "points": [[120,150], [250,300]], "net": "GPIO12"},
+      {"type": "wire", "points": [[120,160], [200,250]], "net": "GPIO13"},
+      {"type": "wire", "points": [[120,170], [150,250]], "net": "GPIO14"}
+    ],
+    "net": [
+      {"name": "+5V", "netId": 1},
+      {"name": "GND", "netId": 2},
+      {"name": "GPIO12", "netId": 3},
+      {"name": "GPIO13", "netId": 4},
+      {"name": "GPIO14", "netId": 5}
+    ]
+  },
+  "pcb": {
+    "head": {
+      "docType": "2",
+      "editorVersion": "6.5.0",
+      "x": 0,
+      "y": 0,
+      "width": 8600,
+      "height": 8600,
+      "activeLayer": 1,
+      "hasCPE": false
+    },
+    "canvas": "TODO_canvas_data",
+    "shape": []
+  },
+  "BOM": {
+    "head": {
+      "docType": "3",
+      "editorVersion": "6.5.0"
+    },
+    "rows": [
+      {"designator": "U1", "package": "ESP32-WROOM-32D", "comment": "ESP32 Module", "quantity": 1},
+      {"designator": "U2", "package": "HLK-PM01", "comment": "Power Module", "quantity": 1},
+      {"designator": "K1", "package": "SRD-05VDC-SL-C", "comment": "Relay NC", "quantity": 1},
+      {"designator": "D1", "package": "WS2812B", "comment": "RGB LED", "quantity": 1},
+      {"designator": "Q1", "package": "TO-92", "comment": "S8050", "quantity": 1},
+      {"designator": "D2", "package": "DO-41", "comment": "1N4007", "quantity": 1},
+      {"designator": "C1", "package": "CAPPRD250W45D6.3H11", "comment": "100uF", "quantity": 1},
+      {"designator": "C2", "package": "C0805", "comment": "0.1uF", "quantity": 3},
+      {"designator": "R1", "package": "AXIAL-0.4", "comment": "1K", "quantity": 2},
+      {"designator": "R2", "package": "AXIAL-0.4", "comment": "10K", "quantity": 2},
+      {"designator": "SW1", "package": "SW_PUSH_6MM", "comment": "Button", "quantity": 1},
+      {"designator": "J1", "package": "KF301-2P", "comment": "Terminal", "quantity": 4}
+    ]
+  },
+  "notes": [
+    "这是一个EasyEDA项目模板，需要手动完成以下步骤：",
+    "1. 在EasyEDA中创建新项目",
+    "2. 从元件库添加元件",
+    "3. 按照circuit-schematic.md连接线路",
+    "4. 转换为PCB并布局",
+    "5. 生成Gerber文件",
+    "",
+    "详细步骤请参考：production/gerber-guide.md"
+  ]
+}
