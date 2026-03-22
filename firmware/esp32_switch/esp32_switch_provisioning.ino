@@ -9,18 +9,21 @@
  * 5. User selects WiFi, enters password and OpenClaw server address
  * 6. Device connects to WiFi and tries to connect to OpenClaw
  * 7. On success, displays pairing code on web page
+ * 8. After pairing confirmed, device saves config and restarts in STA-only mode
  * 
- * Features:
- * - WiFi scan with signal strength
- * - Web-based configuration interface
- * - OpenClaw server connection test
- * - Pairing code display after successful connection
+ * Normal Operation:
+ * - On startup, if WiFi config exists, connects automatically
+ * - No AP mode after first successful pairing
+ * 
+ * Reset to Provisioning Mode:
+ * - Hold button for 5+ seconds to clear WiFi config and restart in AP mode
  */
 
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 #include <mbedtls/ecdh.h>
 #include <mbedtls/ecp.h>
 #include <mbedtls/entropy.h>
@@ -32,23 +35,31 @@
 
 // ------------------- Configuration -------------------
 const char* AP_SSID_PREFIX = "OpenClaw-SmartSwitch";
-const char* AP_PASSWORD = "12345678";  // Default AP password
+const char* AP_PASSWORD = "12345678";
 const uint16_t TCP_PORT = 8080;
 const uint8_t RELAY_PIN = 12;
 const uint8_t LED_PIN = 14;
 const uint8_t BUTTON_PIN = 13;
+const unsigned long BUTTON_RESET_TIME = 5000;
+
+// Preferences keys
+Preferences preferences;
+const char* PREF_WIFI_SSID = "wifi_ssid";
+const char* PREF_WIFI_PASS = "wifi_pass";
+const char* PREF_OPENCLAW_HOST = "ocl_host";
+const char* PREF_OPENCLAW_PORT = "ocl_port";
+const char* PREF_PAIRED = "paired";
 
 // State
-WebServer server(80);
+WebServer* server = nullptr;
 bool provisioningMode = true;
 bool wifiConnected = false;
 bool serverConnected = false;
-String selectedSSID = "";
-String selectedPassword = "";
-String openclawHost = "";
-uint16_t openclawPort = 0;
+bool pairingConfirmed = false;
 String pairingCode = "";
 String deviceName = "";
+String openclawHost = "";
+uint16_t openclawPort = 8080;
 
 // EC key pair
 mbedtls_ecp_keypair keypair;
@@ -59,23 +70,29 @@ bool keysInitialized = false;
 // Session keys
 uint8_t sessionKey[32];
 uint8_t signKey[32];
-bool pairingComplete = false;
 
 // Relay state
 bool relayState = false;
 
 // Forward declarations
 void setupProvisioningMode();
+void setupNormalMode();
+void handleNormalOperation();
 void handleRoot();
 void handleScan();
 void handleConnect();
 void handleStatus();
-void handlePairing();
+void handleConfirmPairing();
 void handleControl();
 void generateKeyPair();
-bool saveConfig();
-bool loadConfig();
+bool loadKeyPair();
+bool saveKeyPair();
 String getDeviceAPName();
+bool tryConnectToOpenClaw();
+String generatePairingCode(String ephemeralPublicKeyB64, String saltB64);
+void performECDH(uint8_t* peerPublicKey, size_t peerKeyLen, uint8_t* sharedSecret);
+void switchToNormalMode();
+void checkButtonReset();
 
 void setup() {
   Serial.begin(115200);
@@ -91,40 +108,70 @@ void setup() {
   mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, NULL, 0);
 
   // Generate or load EC key pair
-  if (!loadConfig()) {
+  if (!loadKeyPair()) {
     generateKeyPair();
-    saveConfig();
+    saveKeyPair();
   }
 
-  // Get device name
   deviceName = getDeviceAPName();
   
-  // Try to load saved WiFi config
-  if (loadWiFiConfig()) {
-    WiFi.begin(savedSSID.c_str(), savedPassword.c_str());
-    Serial.println("Attempting to connect to saved WiFi...");
+  // Check if already paired
+  preferences.begin("smartswitch", true);
+  bool wasPaired = preferences.getBool(PREF_PAIRED, false);
+  String savedSSID = preferences.getString(PREF_WIFI_SSID, "");
+  String savedPass = preferences.getString(PREF_WIFI_PASS, "");
+  openclawHost = preferences.getString(PREF_OPENCLAW_HOST, "");
+  openclawPort = preferences.getUShort(PREF_OPENCLAW_PORT, 8080);
+  preferences.end();
+
+  if (wasPaired && savedSSID.length() > 0) {
+    // Already paired, try to connect to WiFi
+    Serial.println("Already paired, connecting to WiFi...");
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(savedSSID.c_str(), savedPass.c_str());
     
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 30) {
       delay(500);
       Serial.print(".");
       attempts++;
+      // Check for reset button during connection
+      if (digitalRead(BUTTON_PIN) == LOW) {
+        delay(50);
+        if (digitalRead(BUTTON_PIN) == LOW) {
+          // Button held, wait for reset
+          unsigned long pressStart = millis();
+          while (digitalRead(BUTTON_PIN) == LOW && millis() - pressStart < BUTTON_RESET_TIME) {
+            delay(10);
+          }
+          if (millis() - pressStart >= BUTTON_RESET_TIME) {
+            // Clear config and restart
+            preferences.begin("smartswitch", false);
+            preferences.clear();
+            preferences.end();
+            Serial.println("Config cleared, restarting...");
+            ESP.restart();
+          }
+        }
+      }
     }
     
     if (WiFi.status() == WL_CONNECTED) {
       wifiConnected = true;
+      provisioningMode = false;
       Serial.println("\nWiFi connected!");
       Serial.print("IP: ");
       Serial.println(WiFi.localIP());
-      provisioningMode = false;
-      
-      // Start normal operation mode
+      digitalWrite(LED_PIN, HIGH);
       setupNormalMode();
+    } else {
+      Serial.println("\nWiFi connection failed, entering provisioning mode");
+      provisioningMode = true;
+      setupProvisioningMode();
     }
-  }
-
-  // If not connected, start provisioning mode
-  if (!wifiConnected) {
+  } else {
+    // Not paired, enter provisioning mode
+    Serial.println("Not paired, entering provisioning mode");
     provisioningMode = true;
     setupProvisioningMode();
   }
@@ -132,7 +179,16 @@ void setup() {
 
 void loop() {
   if (provisioningMode) {
-    server.handleClient();
+    if (server) {
+      server->handleClient();
+    }
+    checkButtonReset();
+    
+    // If pairing confirmed, save config and switch to normal mode
+    if (pairingConfirmed && wifiConnected && serverConnected) {
+      delay(1000); // Give time for final response
+      switchToNormalMode();
+    }
   } else {
     handleNormalOperation();
   }
@@ -140,27 +196,31 @@ void loop() {
 
 // ------------------- Provisioning Mode -------------------
 void setupProvisioningMode() {
+  Serial.println("\n=== Provisioning Mode ===");
+  
   // Start AP mode
   WiFi.mode(WIFI_AP);
   WiFi.softAP(deviceName.c_str(), AP_PASSWORD);
   
-  Serial.println("\n=== Provisioning Mode ===");
   Serial.print("AP Name: ");
   Serial.println(deviceName);
   Serial.print("AP Password: ");
   Serial.println(AP_PASSWORD);
-  Serial.print("Connect to: http://192.168.4.1");
+  Serial.println("Connect and open: http://192.168.4.1");
   Serial.println("==========================\n");
   
-  // Setup web server routes
-  server.on("/", handleRoot);
-  server.on("/scan", handleScan);
-  server.on("/connect", HTTP_POST, handleConnect);
-  server.on("/status", handleStatus);
-  server.on("/pairing", handlePairing);
-  server.on("/control", handleControl);
+  // Setup web server
+  server = new WebServer(80);
+  server->on("/", handleRoot);
+  server->on("/scan", handleScan);
+  server->on("/connect", HTTP_POST, handleConnect);
+  server->on("/status", handleStatus);
+  server->on("/confirm", HTTP_POST, handleConfirmPairing);
+  server->on("/control", handleControl);
+  server->begin();
   
-  server.begin();
+  // Blink LED to indicate provisioning mode
+  digitalWrite(LED_PIN, HIGH);
 }
 
 void handleRoot() {
@@ -200,14 +260,6 @@ void handleRoot() {
     .wifi-item.selected { background: #e8f5e9; }
     .wifi-name { font-weight: 500; }
     .wifi-rssi { color: #888; font-size: 14px; }
-    .signal { display: flex; align-items: center; gap: 2px; }
-    .bar { width: 4px; background: #4CAF50; border-radius: 2px; }
-    .bar:nth-child(1) { height: 8px; }
-    .bar:nth-child(2) { height: 12px; }
-    .bar:nth-child(3) { height: 16px; }
-    .bar:nth-child(4) { height: 20px; }
-    .bar.weak { background: #f44336; }
-    .bar.medium { background: #ff9800; }
     button { width: 100%; padding: 14px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
              color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; 
              cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; }
@@ -220,10 +272,11 @@ void handleRoot() {
     .success { background: #e8f5e9; color: #2e7d32; padding: 16px; border-radius: 8px; text-align: center; }
     .error { background: #ffebee; color: #c62828; padding: 16px; border-radius: 8px; text-align: center; }
     .pairing-code { font-size: 48px; font-weight: bold; letter-spacing: 8px; 
-                    color: #667eea; text-align: center; margin: 20px 0; }
+                    color: #667eea; text-align: center; margin: 20px 0; font-family: monospace; }
     .info-box { background: #e3f2fd; padding: 16px; border-radius: 8px; margin-top: 16px; }
     .info-box p { color: #1565c0; margin: 8px 0; }
-    #status { display: none; }
+    #step2, #step3, #status { display: none; }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
@@ -240,7 +293,7 @@ void handleRoot() {
         <button onclick="scanWiFi()">🔄 刷新列表</button>
       </div>
       
-      <div id="step2" style="display:none;">
+      <div id="step2">
         <div class="step"><div class="step-num">2</div><h2>输入 WiFi 密码</h2></div>
         <p id="selectedWifi" style="margin-bottom:16px;color:#666;"></p>
         <div class="form-group">
@@ -250,7 +303,7 @@ void handleRoot() {
         <button onclick="showStep3()">下一步</button>
       </div>
       
-      <div id="step3" style="display:none;">
+      <div id="step3">
         <div class="step"><div class="step-num">3</div><h2>输入 OpenClaw 服务器地址</h2></div>
         <div class="form-group">
           <label for="serverHost">服务器地址</label>
@@ -263,12 +316,14 @@ void handleRoot() {
         <button onclick="startConnect()">连接并配对</button>
       </div>
       
-      <div id="status" style="display:none;">
-        <div class="loading" id="connectingStatus">
-          <div class="spinner"></div>
-          <p id="statusText">正在连接...</p>
+      <div id="status">
+        <div id="connectingStatus">
+          <div class="loading">
+            <div class="spinner"></div>
+            <p id="statusText">正在连接...</p>
+          </div>
         </div>
-        <div id="successStatus" style="display:none;">
+        <div id="successStatus" class="hidden">
           <div class="success">
             <p>✅ 网络对接成功！</p>
           </div>
@@ -276,11 +331,14 @@ void handleRoot() {
             <p>📱 请将以下配对码提供给 OpenClaw 完成配对：</p>
             <div class="pairing-code" id="pairingCode">------</div>
             <p style="font-size:14px;color:#888;margin-top:12px;">
-              在 OpenClaw 中使用 device.pairing.start 工具，输入此配对码进行配对
+              在 OpenClaw 中使用 device.pairing.confirm 工具，输入此配对码完成配对
             </p>
           </div>
+          <button onclick="confirmPairing()" style="margin-top:16px;" id="confirmBtn">
+            ✅ 已完成配对，重启设备
+          </button>
         </div>
-        <div id="errorStatus" style="display:none;">
+        <div id="errorStatus" class="hidden">
           <div class="error">
             <p id="errorText">连接失败</p>
           </div>
@@ -301,14 +359,18 @@ void handleRoot() {
         .then(r => r.json())
         .then(data => {
           let html = '';
-          data.networks.sort((a, b) => b.rssi - a.rssi).forEach(net => {
-            const signal = getSignalBars(net.rssi);
-            html += '<div class="wifi-item" onclick="selectWifi(\'' + net.ssid + '\')">';
-            html += '<span class="wifi-name">' + net.ssid + '</span>';
-            html += '<span class="wifi-rssi">' + signal + ' ' + net.rssi + 'dBm</span>';
-            html += '</div>';
-          });
-          document.getElementById('wifiList').innerHTML = html || '<p style="padding:16px;color:#888;">未找到 WiFi 网络</p>';
+          if (data.networks && data.networks.length > 0) {
+            data.networks.sort((a, b) => b.rssi - a.rssi).forEach(net => {
+              const signal = getSignalBars(net.rssi);
+              html += '<div class="wifi-item" onclick="selectWifi(\'' + net.ssid + '\', this)">';
+              html += '<span class="wifi-name">' + net.ssid + '</span>';
+              html += '<span class="wifi-rssi">' + signal + ' ' + net.rssi + 'dBm</span>';
+              html += '</div>';
+            });
+          } else {
+            html = '<p style="padding:16px;color:#888;">未找到 WiFi 网络</p>';
+          }
+          document.getElementById('wifiList').innerHTML = html;
         })
         .catch(e => {
           document.getElementById('wifiList').innerHTML = '<p style="padding:16px;color:#c62828;">扫描失败: ' + e + '</p>';
@@ -322,10 +384,10 @@ void handleRoot() {
       return '▂';
     }
     
-    function selectWifi(ssid) {
+    function selectWifi(ssid, el) {
       selectedSSID = ssid;
-      document.querySelectorAll('.wifi-item').forEach(el => el.classList.remove('selected'));
-      event.target.closest('.wifi-item').classList.add('selected');
+      document.querySelectorAll('.wifi-item').forEach(e => e.classList.remove('selected'));
+      el.classList.add('selected');
       document.getElementById('selectedWifi').textContent = '已选择: ' + ssid;
       document.getElementById('step1').style.display = 'none';
       document.getElementById('step2').style.display = 'block';
@@ -370,33 +432,59 @@ void handleRoot() {
       .catch(e => showError(e.toString()));
     }
     
+    let statusCheckCount = 0;
     function checkStatus() {
       fetch('/status')
         .then(r => r.json())
         .then(data => {
-          if (data.wifi && data.server) {
-            document.getElementById('connectingStatus').style.display = 'none';
-            document.getElementById('successStatus').style.display = 'block';
+          statusCheckCount++;
+          if (data.wifi && data.server && data.pairingCode) {
+            document.getElementById('connectingStatus').classList.add('hidden');
+            document.getElementById('successStatus').classList.remove('hidden');
             document.getElementById('pairingCode').textContent = data.pairingCode;
           } else if (data.error) {
             showError(data.error);
-          } else {
+          } else if (statusCheckCount < 60) {
             document.getElementById('statusText').textContent = data.status || '连接中...';
             setTimeout(checkStatus, 1000);
+          } else {
+            showError('连接超时');
           }
         })
-        .catch(e => setTimeout(checkStatus, 1000));
+        .catch(e => {
+          statusCheckCount++;
+          if (statusCheckCount < 60) {
+            setTimeout(checkStatus, 1000);
+          } else {
+            showError('连接超时');
+          }
+        });
+    }
+    
+    function confirmPairing() {
+      fetch('/confirm', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+          if (data.success) {
+            document.getElementById('confirmBtn').textContent = '重启中...';
+            document.getElementById('confirmBtn').disabled = true;
+          }
+        });
     }
     
     function showError(msg) {
-      document.getElementById('connectingStatus').style.display = 'none';
-      document.getElementById('errorStatus').style.display = 'block';
+      document.getElementById('connectingStatus').classList.add('hidden');
+      document.getElementById('errorStatus').classList.remove('hidden');
       document.getElementById('errorText').textContent = msg;
     }
     
     function resetToStep1() {
       document.getElementById('status').style.display = 'none';
+      document.getElementById('successStatus').classList.add('hidden');
+      document.getElementById('errorStatus').classList.add('hidden');
+      document.getElementById('connectingStatus').classList.remove('hidden');
       document.getElementById('step1').style.display = 'block';
+      statusCheckCount = 0;
       scanWiFi();
     }
     
@@ -407,7 +495,7 @@ void handleRoot() {
 </html>
   )";
   
-  server.send(200, "text/html", html);
+  server->send(200, "text/html", html);
 }
 
 void handleScan() {
@@ -424,29 +512,36 @@ void handleScan() {
   
   String response;
   serializeJson(doc, response);
-  server.send(200, "application/json", response);
+  server->send(200, "application/json", response);
 }
 
 void handleConnect() {
-  if (!server.hasArg("plain")) {
-    server.send(400, "application/json", "{\"success\":false,\"error\":\"No data\"}");
+  if (!server->hasArg("plain")) {
+    server->send(400, "application/json", "{\"success\":false,\"error\":\"No data\"}");
     return;
   }
   
   DynamicJsonDocument doc(512);
-  deserializeJson(doc, server.arg("plain"));
+  deserializeJson(doc, server->arg("plain"));
   
-  selectedSSID = doc["ssid"].as<String>();
-  selectedPassword = doc["password"].as<String>();
+  String ssid = doc["ssid"].as<String>();
+  String password = doc["password"].as<String>();
   openclawHost = doc["host"].as<String>();
   openclawPort = doc["port"].as<uint16_t>();
   
-  // Start connection in background
-  server.send(200, "application/json", "{\"success\":true}");
+  // Save config
+  preferences.begin("smartswitch", false);
+  preferences.putString(PREF_WIFI_SSID, ssid);
+  preferences.putString(PREF_WIFI_PASS, password);
+  preferences.putString(PREF_OPENCLAW_HOST, openclawHost);
+  preferences.putUShort(PREF_OPENCLAW_PORT, openclawPort);
+  preferences.end();
   
-  // Initiate connection
+  // Switch to AP+STA mode and connect
   WiFi.mode(WIFI_AP_STA);
-  WiFi.begin(selectedSSID.c_str(), selectedPassword.c_str());
+  WiFi.begin(ssid.c_str(), password.c_str());
+  
+  server->send(200, "application/json", "{\"success\":true}");
 }
 
 void handleStatus() {
@@ -457,9 +552,8 @@ void handleStatus() {
     doc["wifi"] = true;
     doc["ip"] = WiFi.localIP().toString();
     
-    // Try to connect to OpenClaw server
     if (!serverConnected) {
-      if (tryConnectToServer()) {
+      if (tryConnectToOpenClaw()) {
         serverConnected = true;
         doc["server"] = true;
         doc["pairingCode"] = pairingCode;
@@ -478,18 +572,23 @@ void handleStatus() {
   
   String response;
   serializeJson(doc, response);
-  server.send(200, "application/json", response);
+  server->send(200, "application/json", response);
 }
 
-bool tryConnectToServer() {
+void handleConfirmPairing() {
+  pairingConfirmed = true;
+  server->send(200, "application/json", "{\"success\":true}");
+}
+
+bool tryConnectToOpenClaw() {
   WiFiClient client;
   
-  Serial.print("Connecting to ");
+  Serial.print("Connecting to OpenClaw: ");
   Serial.print(openclawHost);
   Serial.print(":");
   Serial.println(openclawPort);
   
-  if (!client.connect(openclawHost.c_str(), openclawPort, 5000)) {
+  if (!client.connect(openclawHost.c_str(), openclawPort, 10000)) {
     Serial.println("Server connection failed");
     return false;
   }
@@ -538,10 +637,9 @@ bool tryConnectToServer() {
     deserializeJson(resp, response);
     
     if (resp["type"] == "pairing_response") {
-      // Generate confirmation code
       pairingCode = generatePairingCode(resp["ephemeralPublicKey"].as<String>(), 
                                         resp["salt"].as<String>());
-      
+      Serial.println("Pairing code generated: " + pairingCode);
       free(publicKeyB64);
       client.stop();
       return true;
@@ -554,25 +652,21 @@ bool tryConnectToServer() {
 }
 
 String generatePairingCode(String ephemeralPublicKeyB64, String saltB64) {
-  // Decode ephemeral public key
-  size_t ephKeyLen = strlen(ephemeralPublicKeyB64.c_str());
+  size_t ephKeyLen = ephemeralPublicKeyB64.length();
   uint8_t* ephemeralPublicKey = (uint8_t*)malloc(ephKeyLen);
   size_t decodedLen = 0;
   mbedtls_base64_decode(ephemeralPublicKey, ephKeyLen, &decodedLen, 
                         (const unsigned char*)ephemeralPublicKeyB64.c_str(), 
-                        strlen(ephemeralPublicKeyB64.c_str()));
+                        ephemeralPublicKeyB64.length());
   
-  // Perform ECDH
   uint8_t sharedSecret[32];
   performECDH(ephemeralPublicKey, decodedLen, sharedSecret);
   
-  // Decode salt
   uint8_t saltBytes[16];
   mbedtls_base64_decode(saltBytes, sizeof(saltBytes), &decodedLen,
                         (const unsigned char*)saltB64.c_str(),
-                        strlen(saltB64.c_str()));
+                        saltB64.length());
   
-  // Generate confirmation code
   uint8_t confirmHash[32];
   mbedtls_sha256_context shaCtx;
   mbedtls_sha256_init(&shaCtx);
@@ -591,65 +685,70 @@ String generatePairingCode(String ephemeralPublicKeyB64, String saltB64) {
   return String(codeStr);
 }
 
-void handlePairing() {
-  // Endpoint for checking pairing status
+void handleControl() {
   DynamicJsonDocument doc(128);
-  doc["pairingCode"] = pairingCode;
-  doc["paired"] = pairingComplete;
-  doc["deviceId"] = WiFi.macAddress();
-  doc["ip"] = WiFi.localIP().toString();
-  
+  doc["success"] = false;
+  doc["error"] = "Not implemented in provisioning mode";
   String response;
   serializeJson(doc, response);
-  server.send(200, "application/json", response);
+  server->send(200, "application/json", response);
 }
 
-void handleControl() {
-  // Control endpoint for testing
-  DynamicJsonDocument doc(256);
+void switchToNormalMode() {
+  Serial.println("Pairing complete, saving config and restarting...");
   
-  if (!pairingComplete) {
-    doc["success"] = false;
-    doc["error"] = "Not paired";
-  } else {
-    if (server.hasArg("plain")) {
-      DynamicJsonDocument req(128);
-      deserializeJson(req, server.arg("plain"));
-      String action = req["action"];
-      
-      if (action == "on") {
-        relayState = true;
-        digitalWrite(RELAY_PIN, HIGH);
-        doc["success"] = true;
-        doc["state"] = "on";
-      } else if (action == "off") {
-        relayState = false;
-        digitalWrite(RELAY_PIN, LOW);
-        doc["success"] = true;
-        doc["state"] = "off";
-      } else if (action == "query") {
-        doc["success"] = true;
-        doc["state"] = relayState ? "on" : "off";
-      } else {
-        doc["success"] = false;
-        doc["error"] = "Unknown action";
-      }
-    }
+  // Save paired status
+  preferences.begin("smartswitch", false);
+  preferences.putBool(PREF_PAIRED, true);
+  preferences.end();
+  
+  // Stop server
+  if (server) {
+    server->stop();
+    delete server;
+    server = nullptr;
   }
   
-  String response;
-  serializeJson(doc, response);
-  server.send(200, "application/json", response);
+  // Turn off AP
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  
+  // Restart
+  ESP.restart();
+}
+
+void checkButtonReset() {
+  static unsigned long pressStartTime = 0;
+  static bool buttonPressed = false;
+  
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    if (!buttonPressed) {
+      buttonPressed = true;
+      pressStartTime = millis();
+    } else if (millis() - pressStartTime >= BUTTON_RESET_TIME) {
+      Serial.println("Button held, clearing config...");
+      preferences.begin("smartswitch", false);
+      preferences.clear();
+      preferences.end();
+      ESP.restart();
+    }
+  } else {
+    buttonPressed = false;
+    pressStartTime = 0;
+  }
 }
 
 // ------------------- Normal Operation Mode -------------------
 void setupNormalMode() {
-  // Start TCP server
-  // ... existing code for normal operation
+  Serial.println("Entering normal operation mode");
+  
+  // Start TCP server for commands
+  // (existing normal operation code)
 }
 
 void handleNormalOperation() {
-  // ... existing code
+  // Handle commands from OpenClaw
+  // (existing normal operation code)
 }
 
 // ------------------- Utility Functions -------------------
@@ -672,19 +771,14 @@ void generateKeyPair() {
   Serial.println("EC key pair generated");
 }
 
-bool saveConfig() {
-  // Save to preferences/NVS
+bool loadKeyPair() {
+  // In production, load from preferences/NVS
+  return false;
+}
+
+bool saveKeyPair() {
+  // In production, save to preferences/NVS
   return true;
-}
-
-bool loadConfig() {
-  // Load from preferences/NVS
-  return false;
-}
-
-bool loadWiFiConfig() {
-  // Load WiFi credentials from preferences
-  return false;
 }
 
 void performECDH(uint8_t* peerPublicKey, size_t peerKeyLen, uint8_t* sharedSecret) {
