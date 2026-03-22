@@ -1,0 +1,106 @@
+{
+  "header": {
+    "title": "OpenClaw Smart Switch - Product Specifications",
+    "version": "1.0",
+    "date": "2026-03-22"
+  },
+  "product": {
+    "name": "OpenClaw Smart Switch",
+    "model": "OC-SW-86-001",
+    "type": "86-type Smart Wall Switch",
+    "dimensions": {
+      "length": 86,
+      "width": 86,
+      "height": 35,
+      "unit": "mm"
+    },
+    "weight": {
+      "value": 80,
+      "unit": "g"
+    },
+    "color": "Matte White",
+    "material": "PC (Flame Retardant)",
+    "ip_rating": "IP20",
+    "certifications": ["CCC (pending)", "CE (pending)"]
+  },
+  "electrical": {
+    "input_voltage": "220V AC 50/60Hz",
+    "operating_voltage": "85-265V AC",
+    "max_load": "10A / 2200W",
+    "standby_power": "< 0.5W",
+    "relay_type": "Normally Closed (NC)",
+    "relay_life": "> 100,000 cycles"
+  },
+  "wireless": {
+    "wifi_standard": "802.11 b/g/n",
+    "wifi_frequency": "2.4 GHz",
+    "bluetooth": "BLE 4.2 (for future use)",
+    "antenna": "PCB Integrated"
+  },
+  "security": {
+    "encryption": "AES-256-GCM",
+    "pairing": "ECDH P-256",
+    "user_confirmation": "6-digit code (Bluetooth-style)"
+  },
+  "environmental": {
+    "operating_temperature": "-10°C to +55°C",
+    "storage_temperature": "-20°C to +70°C",
+    "humidity": "≤ 93% RH (non-condensing)"
+  },
+  "features": {
+    "manual_switch": "Compatible with existing wall switch",
+    "status_indicator": "RGB LED (programmable)",
+    "config_button": "Long press 5s to reset",
+    "protection": ["Overcurrent", "Surge (MOV)"],
+    "provisioning": "Web-based (AP mode)"
+  },
+  "gpio": [
+    {"pin": "GPIO12", "function": "Relay control output"},
+    {"pin": "GPIO13", "function": "Configuration button input"},
+    {"pin": "GPIO14", "function": "RGB LED data output"},
+    {"pin": "GPIO0", "function": "Reserved"},
+    {"pin": "GPIO21", "function": "I2C SDA (reserved)"},
+    {"pin": "GPIO22", "function": "I2C SCL (reserved)"}
+  ],
+  "terminals": {
+    "L": "Live wire input (AC 220V)",
+    "N": "Neutral wire input",
+    "COM": "Load output (to lamp)",
+    "SW": "Manual switch input"
+  },
+  "led_status": [
+    {"color": "Blue", "pattern": "Fast blink (500ms)", "state": "Provisioning mode"},
+    {"color": "Blue", "pattern": "Slow blink (1s)", "state": "Connecting WiFi"},
+    {"color": "Yellow", "pattern": "Slow blink (1s)", "state": "Connecting server"},
+    {"color": "Green", "pattern": "Blink (2s)", "state": "Waiting for pairing"},
+    {"color": "Green", "pattern": "Solid", "state": "Online, paired"},
+    {"color": "Red", "pattern": "Solid", "state": "Offline or error"},
+    {"color": "Red", "pattern": "Fast blink", "state": "Resetting"}
+  ],
+  "package": {
+    "contents": [
+      "1x Smart Switch Module",
+      "1x User Manual",
+      "1x Warranty Card",
+      "2x Mounting Screws"
+    ],
+    "box_size": {
+      "length": 95,
+      "width": 95,
+      "height": 45,
+      "unit": "mm"
+    },
+    "quantity_per_carton": 20,
+    "carton_size": {
+      "length": 500,
+      "width": 300,
+      "height": 200,
+      "unit": "mm"
+    }
+  },
+  "compliance": {
+    "safety": ["Flame retardant housing", "Strong-weak electrical separation"],
+    "emi_emc": "Pending test",
+    "rohs": "Compliant"
+  }
+}
