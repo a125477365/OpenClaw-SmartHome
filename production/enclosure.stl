@@ -1,0 +1,370 @@
+solid OpenClaw_SmartSwitch_TopCover
+  // 上盖主体 - 顶面
+  facet normal 0 0 1
+    outer loop
+      vertex 0 0 35
+      vertex 86 0 35
+      vertex 86 86 35
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 0 0 35
+      vertex 86 86 35
+      vertex 0 86 35
+    endloop
+  endfacet
+  
+  // 上盖主体 - 底面
+  facet normal 0 0 -1
+    outer loop
+      vertex 2 2 0
+      vertex 84 2 0
+      vertex 84 84 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 2 2 0
+      vertex 84 84 0
+      vertex 2 84 0
+    endloop
+  endfacet
+  
+  // LED 孔区域 (顶部中央，直径3mm)
+  // LED 孔圆柱面 - 近似为12边形
+  facet normal 0.965926 0.258819 0
+    outer loop
+      vertex 43 21.5 35
+      vertex 44.5 22.13 0
+      vertex 44.5 22.13 35
+    endloop
+  endfacet
+  facet normal 0.965926 0.258819 0
+    outer loop
+      vertex 43 21.5 35
+      vertex 43 21.5 0
+      vertex 44.5 22.13 0
+    endloop
+  endfacet
+  facet normal 0.707107 0.707107 0
+    outer loop
+      vertex 43 21.5 35
+      vertex 44.07 23.5 0
+      vertex 44.07 23.5 35
+    endloop
+  endfacet
+  facet normal 0.707107 0.707107 0
+    outer loop
+      vertex 43 21.5 35
+      vertex 43 21.5 0
+      vertex 44.07 23.5 0
+    endloop
+  endfacet
+  
+  // 按钮孔区域 (底部中央，直径8mm，凹入2mm)
+  // 按钮孔圆柱面 - 近似为12边形
+  facet normal -0.965926 -0.258819 0
+    outer loop
+      vertex 43 60 33
+      vertex 41.5 59.37 35
+      vertex 41.5 59.37 33
+    endloop
+  endfacet
+  facet normal -0.965926 -0.258819 0
+    outer loop
+      vertex 43 60 33
+      vertex 43 60 35
+      vertex 41.5 59.37 35
+    endloop
+  endfacet
+  
+  // 边框 - 前面
+  facet normal 0 -1 0
+    outer loop
+      vertex 0 0 35
+      vertex 86 0 35
+      vertex 86 0 0
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex 0 0 35
+      vertex 86 0 0
+      vertex 0 0 0
+    endloop
+  endfacet
+  
+  // 边框 - 后面
+  facet normal 0 1 0
+    outer loop
+      vertex 0 86 35
+      vertex 86 86 35
+      vertex 86 86 0
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex 0 86 35
+      vertex 86 86 0
+      vertex 0 86 0
+    endloop
+  endfacet
+  
+  // 边框 - 左面
+  facet normal -1 0 0
+    outer loop
+      vertex 0 0 35
+      vertex 0 86 35
+      vertex 0 86 0
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex 0 0 35
+      vertex 0 86 0
+      vertex 0 0 0
+    endloop
+  endfacet
+  
+  // 边框 - 右面
+  facet normal 1 0 0
+    outer loop
+      vertex 86 0 35
+      vertex 86 86 35
+      vertex 86 86 0
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 86 0 35
+      vertex 86 86 0
+      vertex 86 0 0
+    endloop
+  endfacet
+  
+  // 安装孔 - 左上
+  facet normal 0 0 -1
+    outer loop
+      vertex 10 10 0
+      vertex 14 10 0
+      vertex 14 14 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 10 10 0
+      vertex 14 14 0
+      vertex 10 14 0
+    endloop
+  endfacet
+  
+  // 安装孔 - 右上
+  facet normal 0 0 -1
+    outer loop
+      vertex 72 10 0
+      vertex 76 10 0
+      vertex 76 14 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 72 10 0
+      vertex 76 14 0
+      vertex 72 14 0
+    endloop
+  endfacet
+  
+  // 安装孔 - 左下
+  facet normal 0 0 -1
+    outer loop
+      vertex 10 72 0
+      vertex 14 72 0
+      vertex 14 76 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 10 72 0
+      vertex 14 76 0
+      vertex 10 76 0
+    endloop
+  endfacet
+  
+  // 安装孔 - 右下
+  facet normal 0 0 -1
+    outer loop
+      vertex 72 72 0
+      vertex 76 72 0
+      vertex 76 76 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 72 72 0
+      vertex 76 76 0
+      vertex 72 76 0
+    endloop
+  endfacet
+  
+endsolid OpenClaw_SmartSwitch_TopCover
+
+solid OpenClaw_SmartSwitch_BottomCover
+  // 下盖主体 - 底面
+  facet normal 0 0 -1
+    outer loop
+      vertex 0 0 0
+      vertex 86 0 0
+      vertex 86 86 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 0 0 0
+      vertex 86 86 0
+      vertex 0 86 0
+    endloop
+  endfacet
+  
+  // 下盖主体 - 顶面（内部）
+  facet normal 0 0 1
+    outer loop
+      vertex 2 2 30
+      vertex 84 2 30
+      vertex 84 84 30
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 2 2 30
+      vertex 84 84 30
+      vertex 2 84 30
+    endloop
+  endfacet
+  
+  // 边框
+  facet normal 0 -1 0
+    outer loop
+      vertex 0 0 35
+      vertex 86 0 35
+      vertex 86 0 0
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex 0 0 35
+      vertex 86 0 0
+      vertex 0 0 0
+    endloop
+  endfacet
+  
+  facet normal 0 1 0
+    outer loop
+      vertex 0 86 35
+      vertex 86 86 35
+      vertex 86 86 0
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex 0 86 35
+      vertex 86 86 0
+      vertex 0 86 0
+    endloop
+  endfacet
+  
+  facet normal -1 0 0
+    outer loop
+      vertex 0 0 35
+      vertex 0 86 35
+      vertex 0 86 0
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex 0 0 35
+      vertex 0 86 0
+      vertex 0 0 0
+    endloop
+  endfacet
+  
+  facet normal 1 0 0
+    outer loop
+      vertex 86 0 35
+      vertex 86 86 35
+      vertex 86 86 0
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 86 0 35
+      vertex 86 86 0
+      vertex 86 0 0
+    endloop
+  endfacet
+  
+  // 接线端子孔 - L孔
+  facet normal 0 0 -1
+    outer loop
+      vertex 50 70 0
+      vertex 55.08 70 0
+      vertex 55.08 75 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 50 70 0
+      vertex 55.08 75 0
+      vertex 50 75 0
+    endloop
+  endfacet
+  
+  // 接线端子孔 - N孔
+  facet normal 0 0 -1
+    outer loop
+      vertex 60 70 0
+      vertex 65.08 70 0
+      vertex 65.08 75 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 60 70 0
+      vertex 65.08 75 0
+      vertex 60 75 0
+    endloop
+  endfacet
+  
+  // 接线端子孔 - COM孔
+  facet normal 0 0 -1
+    outer loop
+      vertex 70 70 0
+      vertex 75.08 70 0
+      vertex 75.08 75 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 70 70 0
+      vertex 75.08 75 0
+      vertex 70 75 0
+    endloop
+  endfacet
+  
+  // 接线端子孔 - SW孔
+  facet normal 0 0 -1
+    outer loop
+      vertex 80 70 0
+      vertex 85.08 70 0
+      vertex 85.08 75 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 80 70 0
+      vertex 85.08 75 0
+      vertex 80 75 0
+    endloop
+  endfacet
+  
+endsolid OpenClaw_SmartSwitch_BottomCover
