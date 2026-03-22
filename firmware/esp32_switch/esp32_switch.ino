@@ -6,7 +6,7 @@
  * Features:
  * - Connects to WiFi (STA mode) using credentials via SmartConfig
  * - Uses unique MAC address as deviceId
- * - Generates unique EC key pair on first boot (Curve25519)
+ * - Generates unique EC key pair on first boot (P-256/secp256r1)
  * - ECDH key exchange during pairing (no factory secret)
  * - User confirmation via button press (simulate numeric comparison)
  * - All messages encrypted with AES-256-GCM
@@ -253,7 +253,7 @@ void handlePairingStart(WiFiClient client, JsonDocument& req) {
   size_t publicKeyLen = 0;
   mbedtls_ecp_group grp;
   mbedtls_ecp_group_init(&grp);
-  mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
+  mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
   mbedtls_ecp_point Q;
   mbedtls_ecp_point_init(&Q);
   mbedtls_ecp_copy(&Q, &keypair.Q);
@@ -456,7 +456,7 @@ void handleEncryptedCommand(WiFiClient client, JsonDocument& req) {
 void generateKeyPair() {
   mbedtls_ecp_keypair_init(&keypair);
   mbedtls_ecp_group_init(&keypair.grp);
-  mbedtls_ecp_group_load(&keypair.grp, MBEDTLS_ECP_DP_CURVE25519);
+  mbedtls_ecp_group_load(&keypair.grp, MBEDTLS_ECP_DP_SECP256R1);
   mbedtls_mpi_init(&keypair.d);
   mbedtls_ecp_point_init(&keypair.Q);
 
@@ -485,7 +485,7 @@ bool saveKeyPair() {
 void performECDH(uint8_t* peerPublicKey, size_t peerKeyLen, uint8_t* sharedSecret) {
   mbedtls_ecp_group grp;
   mbedtls_ecp_group_init(&grp);
-  mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
+  mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
 
   // Parse peer's public key
   mbedtls_ecp_point peerQ;

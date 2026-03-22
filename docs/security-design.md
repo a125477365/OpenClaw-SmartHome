@@ -19,7 +19,7 @@ This document details the security measures implemented in the OpenClaw Smart Ho
 
 - **MAC Address as Device ID**: Each ESP32 has a globally unique MAC address burned in during manufacturing, used as the immutable deviceId (like Bluetooth BD_ADDR)
 
-- **Per-Device EC Key Pair**: Each device generates its own EC key pair (Curve25519 or secp256r1) during first boot. The private key never leaves the device; the public key is shared during pairing.
+- **Per-Device EC Key Pair**: Each device generates its own EC key pair (secp256r1/P-256) during first boot. The private key never leaves the device; the public key is shared during pairing.
 
 - **ECDH Key Exchange**: Session keys are derived through Elliptic Curve Diffie-Hellman key exchange:
   - Both parties exchange public keys
